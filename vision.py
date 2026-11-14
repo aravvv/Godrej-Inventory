@@ -27,7 +27,7 @@ def get_groq_api_key():
         return db_key.strip()
     raise ValueError("GROQ_API_KEY not configured. Please set it in .env or environment variables.")
 
-def prepare_image(image_bytes, max_dimension=768, quality=80):
+def prepare_image(image_bytes, max_dimension=600, quality=75):
     """
     Fixes EXIF orientation (crucial for iPhones), resizes to save tokens,
     and returns (base64_str, thumbnail_base64).
@@ -38,7 +38,7 @@ def prepare_image(image_bytes, max_dimension=768, quality=80):
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    # Generate full-sized normalized image for OCR
+    # Generate full-sized normalized image for OCR (max 600px for speed & token efficiency)
     ocr_img = img.copy()
     ocr_img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
@@ -47,14 +47,14 @@ def prepare_image(image_bytes, max_dimension=768, quality=80):
 
     # Generate small thumbnail for UI (150x150)
     thumb = img.copy()
-    thumb.thumbnail((180, 180), Image.Resampling.LANCZOS)
+    thumb.thumbnail((150, 150), Image.Resampling.LANCZOS)
     t_buf = io.BytesIO()
-    thumb.save(t_buf, format="JPEG", quality=70)
+    thumb.save(t_buf, format="JPEG", quality=65)
     thumb_b64 = "data:image/jpeg;base64," + base64.b64encode(t_buf.getvalue()).decode("utf-8")
 
     return b64_str, thumb_b64
 
-def call_groq_vision(prompt, b64_image, max_retries=3):
+def call_groq_vision(prompt, b64_image, max_retries=2):
     api_key = get_groq_api_key()
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -76,12 +76,12 @@ def call_groq_vision(prompt, b64_image, max_retries=3):
 
     for attempt in range(max_retries):
         try:
-            res = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=25)
+            res = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 return True, json.loads(data["choices"][0]["message"]["content"])
             elif res.status_code == 429:
-                wait_time = 3 + attempt * 2
+                wait_time = 2 + attempt
                 print(f"[GROQ 429] Rate limited. Waiting {wait_time}s before retry {attempt+1}/{max_retries}...")
                 time.sleep(wait_time)
             else:
@@ -89,9 +89,9 @@ def call_groq_vision(prompt, b64_image, max_retries=3):
         except Exception as e:
             if attempt == max_retries - 1:
                 return False, str(e)
-            time.sleep(2)
+            time.sleep(1)
 
-    return False, "Groq API rate limit exceeded. Please wait a few seconds and retry."
+    return False, "Groq API busy. Please tap scan once again."
 
 def parse_slip_image(image_bytes):
     """

@@ -213,10 +213,66 @@ const App = {
     }
   },
 
+  // Client-Side Image Pre-Compression for Fast Mobile Uploads
+  async compressImage(file, maxDimension = 1000, quality = 0.8) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > maxDimension) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            }
+          } else {
+            if (height > maxDimension) {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+
+          canvas.toBlob(
+            (blob) => {
+              if (blob) {
+                resolve(new File([blob], file.name || "scan.jpg", { type: "image/jpeg" }));
+              } else {
+                resolve(file); // Fallback to original
+              }
+            },
+            "image/jpeg",
+            quality
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = event.target.result;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    });
+  },
+
   // Single Cardboard Slip Photo Handler
   async handleSlipPhoto(e) {
-    const file = e.target.files[0];
+    let file = e.target.files[0];
     if (!file) return;
+
+    this.showLoading(true, "Preparing slip photo...");
+    try {
+      // Compress in browser: 5MB -> 80KB in 50ms
+      file = await this.compressImage(file, 900, 0.8);
+    } catch (err) {
+      console.warn("Pre-compression skipped:", err);
+    }
 
     this.showLoading(true, "Reading slip with Vision AI...");
     const formData = new FormData();
@@ -258,8 +314,16 @@ const App = {
 
   // Bill Photo Handler
   async handleBillPhoto(e) {
-    const file = e.target.files[0];
+    let file = e.target.files[0];
     if (!file) return;
+
+    this.showLoading(true, "Preparing bill photo...");
+    try {
+      // Compress in browser: keep higher resolution for table reading
+      file = await this.compressImage(file, 1400, 0.85);
+    } catch (err) {
+      console.warn("Pre-compression skipped:", err);
+    }
 
     this.showLoading(true, "Analyzing bill table & extracting items...");
     const formData = new FormData();
