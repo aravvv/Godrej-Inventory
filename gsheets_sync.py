@@ -1,56 +1,84 @@
 import os
 import json
+import base64
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Ensure local .env is loaded if available
+load_dotenv()
+
 import gspread
 from google.oauth2.service_account import Credentials
-from database import get_setting
+from database import get_setting, get_inventory_list
 
-# Google Sheets Scopes
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
+DEFAULT_SHEET_ID = "1BF1RgdQVmffReUPSHnKoE-N_jQqmx02OOVXtNlxQ2sc"
+
 class GoogleSheetsSync:
     def __init__(self):
         self.client = None
         self.sheet = None
-        self.spreadsheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip()
+        self.spreadsheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip() or DEFAULT_SHEET_ID
 
     def get_credentials(self):
-        # 1. Check raw JSON string in environment (ideal for Hugging Face Secrets)
-        json_env = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        # 1. Check raw JSON or Base64 string in environment variables (Vercel / Cloud)
+        json_env = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
         if json_env:
             try:
+                # Try direct JSON parse
                 info = json.loads(json_env)
                 return Credentials.from_service_account_info(info, scopes=SCOPES)
-            except Exception as e:
-                print(f"[GSHEET] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+            except Exception:
+                try:
+                    # Try base64 decoded JSON
+                    decoded = base64.b64decode(json_env).decode("utf-8")
+                    info = json.loads(decoded)
+                    return Credentials.from_service_account_info(info, scopes=SCOPES)
+                except Exception as e:
+                    print(f"[GSHEET] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
 
-        # 2. Check local file (e.g. credentials.json)
-        file_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json")
-        if os.path.exists(file_path):
-            return Credentials.from_service_account_file(file_path, scopes=SCOPES)
+        # 2. Check local files
+        curr_dir = os.path.dirname(os.path.abspath(__file__))
+        for fname in ["service_account.json", "credentials.json"]:
+            path = os.path.join(curr_dir, fname)
+            if os.path.exists(path):
+                try:
+                    return Credentials.from_service_account_file(path, scopes=SCOPES)
+                except Exception as e:
+                    print(f"[GSHEET] Error loading {path}: {e}")
+
+        # 3. Check database setting fallback
+        db_creds = get_setting("google_service_account_json", "")
+        if db_creds:
+            try:
+                info = json.loads(db_creds)
+                return Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception:
+                pass
 
         return None
 
     def connect(self):
+        # Always re-check ID
+        self.spreadsheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip() or get_setting("google_sheet_id", "") or DEFAULT_SHEET_ID
         if not self.spreadsheet_id:
-            self.spreadsheet_id = get_setting("google_sheet_id", "")
-
-        if not self.spreadsheet_id:
-            return False, "GOOGLE_SHEET_ID not configured"
+            return False, "GOOGLE_SHEET_ID environment variable not set"
 
         try:
             creds = self.get_credentials()
             if not creds:
-                return False, "Google Service Account credentials not found"
+                return False, "Google Service Account credentials not found (set GOOGLE_SERVICE_ACCOUNT_JSON or place service_account.json)"
 
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open_by_key(self.spreadsheet_id)
             self._ensure_sheets_exist()
-            return True, "Connected to Google Sheet successfully"
+            return True, f"Connected to sheet: {self.sheet.title}"
         except Exception as e:
-            return False, str(e)
+            return False, f"Google Sheets connection failed: {str(e)}"
 
     def _ensure_sheets_exist(self):
         titles = [ws.title for ws in self.sheet.worksheets()]
@@ -73,75 +101,89 @@ class GoogleSheetsSync:
                 "Stock Before", "Stock After", "Invoice No", "Notes"
             ])
 
+    def sync_full_inventory(self):
+        """
+        Pushes a 100% exact atomic mirror of the current inventory to Live_Inventory worksheet.
+        Takes ~0.8s and updates everything in one single call.
+        """
+        ok, msg = self.connect()
+        if not ok:
+            return False, msg
+
+        try:
+            inv_ws = self.sheet.worksheet("Live_Inventory")
+            items = get_inventory_list()
+
+            headers = [
+                "LN Code", "Product Description", "SKU", "Category", "Sub Cat", 
+                "Current Stock", "Dealer Price (Rs)", "Consumer Price (Rs)", 
+                "Last Updated", "Last Modified By"
+            ]
+
+            rows = [headers] + [[
+                it["ln_code"],
+                it.get("description", ""),
+                it.get("sku", ""),
+                it.get("category", ""),
+                it.get("sub_cat", ""),
+                it.get("current_stock", 0),
+                it.get("dealer_price", 0.0),
+                it.get("consumer_price", 0.0),
+                it.get("last_updated", ""),
+                it.get("last_updated_by", "")
+            ] for it in items]
+
+            # Atomic clear and update
+            inv_ws.clear()
+            inv_ws.update(rows, "A1")
+            return True, f"Successfully mirrored {len(items)} items to Google Sheet"
+        except Exception as e:
+            return False, f"Failed to mirror inventory to Google Sheet: {str(e)}"
+
     def sync_batch(self, employee_username, action, source, processed_items, invoice_no=None, notes=None):
         """
-        Syncs a committed batch to both Live_Inventory and Audit_Log sheets.
-        Runs asynchronously/safely without blocking the user.
+        Synchronously updates both Live_Inventory (as a perfect mirror) and Audit_Log.
+        Safe for serverless environments (e.g. Vercel) where background threads freeze.
         """
         ok, msg = self.connect()
         if not ok:
             print(f"[GSHEET SYNC SKIPPED] {msg}")
-            return False
+            return False, msg
 
         try:
-            inv_ws = self.sheet.worksheet("Live_Inventory")
+            # 1. Mirror the full live inventory
+            mirror_ok, mirror_msg = self.sync_full_inventory()
+            if not mirror_ok:
+                print(f"[GSHEET MIRROR WARNING] {mirror_msg}")
+
+            # 2. Append new transaction to Audit_Log
             log_ws = self.sheet.worksheet("Audit_Log")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Load all existing LN codes from column A
-            ln_codes = inv_ws.col_values(1)
+            audit_rows = [[
+                "",  # Auto ID
+                now_str,
+                employee_username,
+                action,
+                source,
+                it["ln_code"],
+                it.get("description", ""),
+                it.get("quantity", 1),
+                it.get("stock_before", 0),
+                it.get("stock_after", 0),
+                invoice_no or "",
+                notes or ""
+            ] for it in processed_items]
 
-            now_str = str(os.popen("date /t").read().strip()) if os.name == 'nt' else ""
+            if audit_rows:
+                log_ws.append_rows(audit_rows)
 
-            for it in processed_items:
-                ln = it["ln_code"]
-                qty = it["quantity"]
-                stock_after = it["stock_after"]
-                stock_before = it["stock_before"]
-
-                # Check if LN code exists in Live_Inventory
-                if ln in ln_codes:
-                    row_idx = ln_codes.index(ln) + 1
-                    # Update Current Stock (Col 6), Last Updated (Col 9), Modified By (Col 10)
-                    inv_ws.update_cell(row_idx, 6, stock_after)
-                    inv_ws.update_cell(row_idx, 9, "Just Now")
-                    inv_ws.update_cell(row_idx, 10, employee_username)
-                else:
-                    # Append new row
-                    inv_ws.append_row([
-                        ln,
-                        it.get("description", ""),
-                        it.get("sku", ""),
-                        it.get("category", ""),
-                        it.get("sub_cat", ""),
-                        stock_after,
-                        it.get("dealer_price", 0.0),
-                        it.get("consumer_price", 0.0),
-                        "Just Now",
-                        employee_username
-                    ])
-                    ln_codes.append(ln)
-
-                # Append to Audit Log
-                log_ws.append_row([
-                    "",  # Auto ID
-                    "Now",
-                    employee_username,
-                    action,
-                    source,
-                    ln,
-                    it.get("description", ""),
-                    qty,
-                    stock_before,
-                    stock_after,
-                    invoice_no or "",
-                    notes or ""
-                ])
-
-            print(f"[GSHEET SYNC] Successfully synced {len(processed_items)} items to Google Sheets.")
-            return True
+            print(f"[GSHEET SYNC] Successfully mirrored inventory & appended {len(audit_rows)} log rows.")
+            return True, "Synced to Google Sheets"
         except Exception as e:
-            print(f"[GSHEET SYNC ERROR] {e}")
-            return False
+            err = f"Google Sheet sync error: {str(e)}"
+            print(f"[GSHEET ERROR] {err}")
+            return False, err
 
 # Singleton instance
 gsheets = GoogleSheetsSync()

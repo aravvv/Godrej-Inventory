@@ -93,7 +93,13 @@ const App = {
       this.loadAuditLogs();
       this.loadUsers();
       this.loadSettings();
+    } else if (screenId === "employeeInventoryScreen") {
+      this.loadInventory();
     }
+  },
+
+  openEmployeeInventory() {
+    this.showScreen("employeeInventoryScreen");
   },
 
   updateUserHeader() {
@@ -531,7 +537,11 @@ const App = {
 
       if (res.ok && data.success) {
         this.playSuccessSound();
-        this.showToast(`Successfully processed ${data.processed.length} items!`, "success");
+        let toastMsg = `Processed ${data.processed.length} items successfully!`;
+        if (data.gsheet_synced) {
+          toastMsg += ` 🔄 Mirrored to Google Sheet`;
+        }
+        this.showToast(toastMsg, "success");
         this.state.stagedBatch = [];
         this.renderStagedList();
         // Return to main dashboard
@@ -571,15 +581,142 @@ const App = {
 
   async loadInventory() {
     const tbody = document.getElementById("inventoryTableBody");
-    tbody.innerHTML = `<tr><td colspan="6" class="text-center">Loading inventory...</td></tr>`;
+    const empContainer = document.getElementById("empInventoryList");
+    if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="text-center">Loading inventory...</td></tr>`;
+    if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder">Loading inventory...</div>`;
 
     try {
       const res = await fetch("/api/inventory");
       const data = await res.json();
       this.state.inventoryData = data.inventory || [];
+      
+      // Update quick stats
+      const totalUnits = this.state.inventoryData.reduce((acc, it) => acc + (Number(it.current_stock) > 0 ? Number(it.current_stock) : 0), 0);
+      const itemsCountEl = document.getElementById("empTotalItemsCount");
+      const unitsCountEl = document.getElementById("empTotalUnitsCount");
+      if (itemsCountEl) itemsCountEl.textContent = this.state.inventoryData.length;
+      if (unitsCountEl) unitsCountEl.textContent = totalUnits.toLocaleString('en-IN');
+
       this.renderInventoryTable(this.state.inventoryData);
+      this.filterEmpInventory();
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="6" class="text-center" style="color:#f43f5e">Failed to load inventory</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="text-center" style="color:#f43f5e">Failed to load inventory</td></tr>`;
+      if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder" style="color:#f43f5e">Failed to load inventory</div>`;
+    }
+  },
+
+  renderEmployeeInventory(items) {
+    const container = document.getElementById("empInventoryList");
+    if (!container) return;
+
+    if (items.length === 0) {
+      container.innerHTML = `
+        <div class="empty-inventory-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--text-muted);margin-bottom:0.75rem;"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+          <p style="font-weight:700;font-size:1.05rem;">No matching stock found</p>
+          <span style="font-size:0.85rem;color:var(--text-muted);">Try a different search or scan IN incoming items</span>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = items.map(it => {
+      const stock = Number(it.current_stock || 0);
+      const isPositive = stock > 0;
+      const stockBadge = isPositive 
+        ? `<span class="stock-badge in-stock">${stock} IN STOCK</span>`
+        : `<span class="stock-badge out-stock">0 STOCK</span>`;
+
+      return `
+        <div class="emp-inventory-card">
+          <div class="emp-inv-header">
+            <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
+            ${stockBadge}
+          </div>
+          <div class="emp-inv-body">
+            <h4 class="emp-inv-title">${this.escapeHtml(it.description || 'Godrej Item')}</h4>
+            <div class="emp-inv-meta">
+              <span class="meta-tag cat-tag">${this.escapeHtml(it.category || 'Godrej Interio')}</span>
+              ${it.sub_cat ? `<span class="meta-tag subcat-tag">${this.escapeHtml(it.sub_cat)}</span>` : ''}
+              ${it.sku ? `<span class="meta-tag sku-tag">SKU: ${this.escapeHtml(it.sku)}</span>` : ''}
+            </div>
+          </div>
+          <div class="emp-inv-footer">
+            <div class="price-box">
+              <span class="price-lbl">Dealer Price</span>
+              <span class="price-val">₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}</span>
+            </div>
+            <div class="updated-box">
+              <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
+              <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  },
+
+  setInventoryFilter(filterType, btnEl) {
+    this.state.inventoryFilter = filterType;
+    if (btnEl && btnEl.parentElement) {
+      btnEl.parentElement.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
+      btnEl.classList.add("active");
+    }
+    this.filterEmpInventory();
+  },
+
+  filterEmpInventory() {
+    const input = document.getElementById("empInventorySearchInput");
+    const query = input ? input.value.trim().toLowerCase() : "";
+    const filterType = this.state.inventoryFilter || "all";
+
+    let list = this.state.inventoryData || [];
+
+    // Filter by tab
+    if (filterType === "in_stock") {
+      list = list.filter(it => Number(it.current_stock || 0) > 0);
+    } else if (filterType === "out_of_stock") {
+      list = list.filter(it => Number(it.current_stock || 0) <= 0);
+    }
+
+    // Filter by query
+    if (query) {
+      list = list.filter(it => 
+        (it.ln_code && it.ln_code.toLowerCase().includes(query)) ||
+        (it.description && it.description.toLowerCase().includes(query)) ||
+        (it.sku && it.sku.toLowerCase().includes(query)) ||
+        (it.category && it.category.toLowerCase().includes(query))
+      );
+    }
+
+    this.renderEmployeeInventory(list);
+  },
+
+  async syncGoogleSheets(btnEl) {
+    const btn = btnEl || document.getElementById("empSyncGsheetsBtn");
+    const origHtml = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="display:inline-block;width:13px;height:13px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;margin-right:6px;vertical-align:middle;"></span> Syncing...`;
+    }
+
+    try {
+      const res = await fetch("/api/sync-gsheets", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        this.playSuccessSound();
+        this.showToast(`Google Sheet Mirrored: ${data.message}`, "success");
+        await this.loadInventory();
+      } else {
+        this.showToast(data.detail || "Google Sheet sync failed", "error");
+      }
+    } catch (e) {
+      this.showToast("Network error syncing Google Sheet", "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
     }
   },
 

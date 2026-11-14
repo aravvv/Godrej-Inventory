@@ -62,18 +62,15 @@
               <span>Sign In</span>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
             </button>
-            <div class="login-hint">
-              <span>Default Admin: <strong>admin</strong> | <strong>admin123</strong></span>
-            </div>
           </form>
         </div>
       </section>
 
-      <!-- SCREEN 2: EMPLOYEE DASHBOARD (3 MAIN MODES) -->
+      <!-- SCREEN 2: EMPLOYEE DASHBOARD (MAIN OPERATIONS) -->
       <section id="employeeScreen" class="screen">
         <div class="dashboard-greeting">
           <h2>Select Operation</h2>
-          <p>Choose an action to start scanning stock</p>
+          <p>Choose an action to start scanning stock or view inventory</p>
         </div>
 
         <div class="mode-grid">
@@ -118,6 +115,20 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
             </div>
           </button>
+
+          <!-- MODE 4: LIVE INVENTORY & STOCK (FOR ALL EMPLOYEES) -->
+          <button class="mode-card mode-inventory" onclick="App.openEmployeeInventory()">
+            <div class="mode-icon-box inv-box">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+            </div>
+            <div class="mode-text">
+              <span class="mode-title">LIVE INVENTORY</span>
+              <span class="mode-desc">View Stock, Search & Google Sheet Mirror</span>
+            </div>
+            <div class="mode-arrow">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </div>
+          </button>
         </div>
 
         <!-- Quick Admin Switcher if user is admin -->
@@ -126,6 +137,72 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
             <span>Open Admin Dashboard & Logs</span>
           </button>
+        </div>
+      </section>
+
+      <!-- SCREEN: EMPLOYEE LIVE INVENTORY & STOCK -->
+      <section id="employeeInventoryScreen" class="screen">
+        <div class="scan-header">
+          <button class="btn-back" onclick="App.showScreen('employeeScreen')">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            <span>Back</span>
+          </button>
+          <div class="mode-pill inv-pill">● LIVE INVENTORY</div>
+        </div>
+
+        <div class="glass-panel" style="padding: 1.25rem; margin-bottom: 1.25rem;">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem; margin-bottom:1rem;">
+            <div>
+              <h2 style="font-size:1.3rem; font-weight:800; letter-spacing:-0.02em;">Warehouse Stock</h2>
+              <p style="font-size:0.8rem; color:var(--text-muted);">Real-time inventory mirrored with Google Sheets</p>
+            </div>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <button id="empSyncGsheetsBtn" class="btn btn-secondary btn-sm" onclick="App.syncGoogleSheets(this)" title="Sync latest counts to Google Sheet">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                <span>Sync Google Sheet</span>
+              </button>
+              <a href="/api/export-excel" class="btn btn-secondary btn-sm" download title="Download Excel Spreadsheet">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                <span>Excel</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Quick Stats Row -->
+          <div class="inventory-quick-stats">
+            <div class="stat-glass-box">
+              <span class="stat-label">Active Items</span>
+              <span id="empTotalItemsCount" class="stat-value">0</span>
+            </div>
+            <div class="stat-glass-box">
+              <span class="stat-label">Total Units in Stock</span>
+              <span id="empTotalUnitsCount" class="stat-value highlight-green">0</span>
+            </div>
+            <div class="stat-glass-box">
+              <span class="stat-label">Catalog Master</span>
+              <span class="stat-value">9,458</span>
+            </div>
+          </div>
+
+          <!-- Search Bar & Filters -->
+          <div style="margin-top: 1rem;">
+            <div class="search-input-wrapper">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" id="empInventorySearchInput" class="glass-input search-input" placeholder="Search by LN code, Product name, SKU, or Category..." oninput="App.filterEmpInventory()">
+            </div>
+            <div class="filter-pills-row">
+              <button class="filter-pill active" onclick="App.setInventoryFilter('all', this)">All Items</button>
+              <button class="filter-pill" onclick="App.setInventoryFilter('in_stock', this)">In Stock (>0)</button>
+              <button class="filter-pill" onclick="App.setInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Inventory Container -->
+        <div id="empInventoryContainer" class="inventory-display-wrap">
+          <div id="empInventoryList" class="emp-inventory-grid">
+            <div class="loading-placeholder">Loading inventory...</div>
+          </div>
         </div>
       </section>
 
@@ -232,10 +309,16 @@
         <div id="inventoryTab" class="admin-content active">
           <div class="inventory-toolbar">
             <input type="text" id="inventorySearchInput" placeholder="Search by LN code, SKU, or Description..." oninput="App.filterInventory()">
-            <a href="/api/export-excel" class="btn btn-secondary btn-sm" download>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-              <span>Download Excel</span>
-            </a>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <button class="btn btn-secondary btn-sm" onclick="App.syncGoogleSheets(this)" title="Sync latest inventory to Google Sheet">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                <span>Sync Google Sheet</span>
+              </button>
+              <a href="/api/export-excel" class="btn btn-secondary btn-sm" download>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                <span>Download Excel</span>
+              </a>
+            </div>
           </div>
           <div class="table-responsive">
             <table class="data-table">

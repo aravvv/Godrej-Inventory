@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+
+# Ensure environment variables are loaded
+load_dotenv()
+
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status, BackgroundTasks
 from gsheets_sync import gsheets
 from fastapi.staticfiles import StaticFiles
@@ -120,7 +125,7 @@ def lookup_code(ln_code: str):
 
 # ----------------- INVENTORY & BATCH ENDPOINTS -----------------
 @app.post("/api/process-batch")
-def process_batch(req: ProcessBatchRequest, background_tasks: BackgroundTasks):
+def process_batch(req: ProcessBatchRequest):
     if req.action not in ["IN", "OUT", "CAME_IN_AND_WENT_OUT"]:
         raise HTTPException(status_code=400, detail="Invalid action type")
     
@@ -136,18 +141,38 @@ def process_batch(req: ProcessBatchRequest, background_tasks: BackgroundTasks):
     if not ok:
         raise HTTPException(status_code=500, detail=str(details))
 
-    # Real-time background sync to Google Sheets
-    background_tasks.add_task(
-        gsheets.sync_batch,
-        employee_username=req.username,
-        action=req.action,
-        source=req.source,
-        processed_items=details,
-        invoice_no=req.invoice_no,
-        notes=req.notes
-    )
+    # Synchronous mirror to Google Sheets (vital on Vercel so serverless does not freeze before sync)
+    gsheet_synced = False
+    gsheet_msg = ""
+    try:
+        gsheet_synced, gsheet_msg = gsheets.sync_batch(
+            employee_username=req.username,
+            action=req.action,
+            source=req.source,
+            processed_items=details,
+            invoice_no=req.invoice_no,
+            notes=req.notes
+        )
+    except Exception as e:
+        print(f"[GSHEET INLINE SYNC ERROR] {e}")
 
-    return {"success": True, "processed": details}
+    return {
+        "success": True,
+        "processed": details,
+        "gsheet_synced": gsheet_synced,
+        "gsheet_message": gsheet_msg
+    }
+
+@app.post("/api/sync-gsheets")
+def manual_sync_gsheets():
+    ok, msg = gsheets.sync_full_inventory()
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {
+        "success": True,
+        "message": msg,
+        "sheet_id": gsheets.spreadsheet_id
+    }
 
 @app.get("/api/inventory")
 def get_inventory(search: str = ""):
@@ -172,9 +197,13 @@ def download_excel():
 @app.get("/api/settings")
 def get_app_settings():
     is_configured = bool(os.getenv("GROQ_API_KEY") or get_setting("groq_api_key"))
+    gsheet_ok, gsheet_msg = gsheets.connect()
     return {
         "is_groq_configured": is_configured,
         "groq_status": "Active & Encrypted in .env" if is_configured else "Not Set",
+        "is_gsheet_configured": gsheet_ok,
+        "gsheet_status": gsheet_msg,
+        "gsheet_id": gsheets.spreadsheet_id,
         "total_catalog_items": len(catalog.items)
     }
 
