@@ -1341,3 +1341,72 @@ input:focus, select:focus {
 .text-center {
   text-align: center;
 }
+
+/* v2 Sync Status & Backup UI */
+.sync-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+  margin-top: 0.5rem;
+}
+
+.sync-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.backup-card {
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.backup-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.btn-warning-outline {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+}
+
+.btn-warning-outline:hover {
+  background: rgba(245, 158, 11, 0.22);
+}
+
+.snapshot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.85rem 1rem;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.6rem;
+}
+
+.code-snippet-box {
+  background: rgba(9, 13, 22, 0.85);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem;
+  font-family: monospace;
+  font-size: 0.72rem;
+  color: #93c5fd;
+  overflow-x: auto;
+  white-space: pre;
+  margin-top: 0.75rem;
+}

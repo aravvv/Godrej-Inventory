@@ -71,6 +71,10 @@
         <div class="dashboard-greeting">
           <h2>Select Operation</h2>
           <p>Choose an action to start scanning stock or view inventory</p>
+          <div id="homeSyncBadge" class="sync-status-bar">
+            <span class="sync-dot"></span>
+            <span id="homeSyncText">Google Sheets Primary • Synced</span>
+          </div>
         </div>
 
         <div class="mode-grid">
@@ -154,12 +158,12 @@
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem; margin-bottom:1rem;">
             <div>
               <h2 style="font-size:1.3rem; font-weight:800; letter-spacing:-0.02em;">Warehouse Stock</h2>
-              <p style="font-size:0.8rem; color:var(--text-muted);">Real-time inventory mirrored with Google Sheets</p>
+              <p id="empSyncedSubtitle" style="font-size:0.8rem; color:var(--text-muted);">Stored permanently in Google Sheets • Auto-synced</p>
             </div>
             <div style="display:flex; gap:0.5rem; align-items:center;">
-              <button id="empSyncGsheetsBtn" class="btn btn-secondary btn-sm" onclick="App.syncGoogleSheets(this)" title="Sync latest counts to Google Sheet">
+              <button id="empSyncGsheetsBtn" class="btn btn-secondary btn-sm" onclick="App.refreshFromSheets(this)" title="Pull latest counts directly from Google Sheet">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                <span>Sync Google Sheet</span>
+                <span>Refresh from Sheet</span>
               </button>
               <a href="/api/export-excel" class="btn btn-secondary btn-sm" download title="Download Excel Spreadsheet">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -302,6 +306,7 @@
           <button class="admin-tab active" onclick="App.switchAdminTab('inventoryTab')">Live Inventory</button>
           <button class="admin-tab" onclick="App.switchAdminTab('logsTab')">Audit Logs</button>
           <button class="admin-tab" onclick="App.switchAdminTab('usersTab')">Employees</button>
+          <button class="admin-tab" onclick="App.switchAdminTab('backupsTab')">Backups</button>
           <button class="admin-tab" onclick="App.switchAdminTab('settingsTab')">Settings</button>
         </div>
 
@@ -310,9 +315,9 @@
           <div class="inventory-toolbar">
             <input type="text" id="inventorySearchInput" placeholder="Search by LN code, SKU, or Description..." oninput="App.filterInventory()">
             <div style="display:flex; gap:0.5rem; align-items:center;">
-              <button class="btn btn-secondary btn-sm" onclick="App.syncGoogleSheets(this)" title="Sync latest inventory to Google Sheet">
+              <button class="btn btn-secondary btn-sm" onclick="App.refreshFromSheets(this)" title="Pull latest live counts directly from Google Sheet">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-                <span>Sync Google Sheet</span>
+                <span>Refresh from Sheet</span>
               </button>
               <a href="/api/export-excel" class="btn btn-secondary btn-sm" download>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -382,7 +387,54 @@
           </div>
         </div>
 
-        <!-- Admin Tab 4: Settings -->
+        <!-- Admin Tab 4: Backups & Recovery -->
+        <div id="backupsTab" class="admin-content">
+          <div class="glass-panel backup-card">
+            <h3>Permanent Google Sheets Storage & Backups</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.35rem;">
+              Every scan and transaction lands directly in <strong>Live_Inventory</strong> and <strong>Audit_Log</strong> on Google Sheets. Daily auto-backups run automatically on the first login or transaction of each day into <strong>Backup_Latest</strong> and <strong>Backup_History</strong>.
+            </p>
+            <div style="margin-top:0.9rem;font-size:0.85rem;">
+              <div><strong>Last Snapshot:</strong> <span id="lastBackupAtText">Loading...</span></div>
+              <div style="margin-top:4px;"><strong>Last Daily Auto-Backup:</strong> <span id="lastAutoBackupText">-</span></div>
+            </div>
+            <div class="backup-actions-row">
+              <button class="btn btn-primary btn-sm" onclick="App.createBackupNow(this)">
+                <span>💾 Create Backup Snapshot Now</span>
+              </button>
+              <a href="/api/export-excel" class="btn btn-secondary btn-sm" download>
+                <span>⬇️ Download Excel Backup</span>
+              </a>
+              <button class="btn btn-warning-outline btn-sm" onclick="App.restoreFromBackup(this)">
+                <span>♻️ Restore from Backup_Latest</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="glass-panel backup-card">
+            <h4 style="margin-bottom:0.75rem;">Recent Snapshot History (Backup_History Tab)</h4>
+            <div id="backupHistoryList">
+              <p style="color:var(--text-muted);font-size:0.85rem;">Loading backup snapshots...</p>
+            </div>
+          </div>
+
+          <div class="glass-panel backup-card">
+            <h4>Optional: External Google Drive Auto-Backup (Apps Script)</h4>
+            <p style="font-size:0.8rem;color:var(--text-muted);margin-top:0.25rem;">
+              For an extra disaster-recovery copy in a separate Drive file, paste this in Google Sheet → Extensions → Apps Script and add a Daily Time Trigger:
+            </p>
+            <div class="code-snippet-box">function nightlyDriveBackup() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var folder = DriveApp.getFoldersByName("Godrej_Backups").hasNext()
+    ? DriveApp.getFoldersByName("Godrej_Backups").next()
+    : DriveApp.createFolder("Godrej_Backups");
+  var dateStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+  DriveApp.getFileById(ss.getId()).makeCopy("Godrej_Inventory_Backup_" + dateStr, folder);
+}</div>
+          </div>
+        </div>
+
+        <!-- Admin Tab 5: Settings -->
         <div id="settingsTab" class="admin-content">
           <div class="settings-card">
             <h3>Vision AI Engine Security</h3>

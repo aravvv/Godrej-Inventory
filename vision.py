@@ -6,7 +6,7 @@ import time
 import io
 from PIL import Image, ImageOps
 from catalog import catalog
-from database import get_setting
+from gsheets_db import get_setting
 
 import os
 from dotenv import load_dotenv

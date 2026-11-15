@@ -1,23 +1,17 @@
 import os
+import tempfile
+from typing import List, Optional
 from dotenv import load_dotenv
 
-# Ensure environment variables are loaded
 load_dotenv()
 
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, status, BackgroundTasks
-from gsheets_sync import gsheets
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-import tempfile
 
-from database import (
-    init_db, authenticate_user, get_all_users, create_user, delete_user,
-    process_stock_batch, get_inventory_list, get_audit_logs, export_inventory_excel,
-    get_setting, set_setting
-)
+from gsheets_db import gsheets_db
 from catalog import catalog
 from vision import parse_slip_image, parse_bill_image
 
@@ -31,21 +25,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database on startup
+
 @app.on_event("startup")
 def startup_event():
-    init_db()
+    try:
+        info = gsheets_db.sync_from_sheets()
+        if not os.getenv("GROQ_API_KEY"):
+            sheet_key = gsheets_db.get_setting("groq_api_key", "")
+            if sheet_key:
+                os.environ["GROQ_API_KEY"] = sheet_key.strip()
+        print(f"[APP STARTUP] Google Sheets Primary Ready: {info}")
+    except Exception as e:
+        print(f"[APP STARTUP WARNING] {e}")
 
-# Pydantic Schemas
+
+# ----------------- SCHEMAS -----------------
 class LoginRequest(BaseModel):
     username: str
     password: str
+
 
 class CreateUserRequest(BaseModel):
     username: str
     password: str
     full_name: str
     role: str = "employee"
+
 
 class BatchItem(BaseModel):
     ln_code: str
@@ -57,64 +62,86 @@ class BatchItem(BaseModel):
     dealer_price: Optional[float] = 0.0
     consumer_price: Optional[float] = 0.0
 
+
 class ProcessBatchRequest(BaseModel):
     username: str
-    action: str  # 'IN', 'OUT', 'CAME_IN_AND_WENT_OUT'
-    source: str  # 'SLIP_BATCH', 'BILL_PHOTO', 'MANUAL'
+    action: str
+    source: str
     items: List[BatchItem]
     invoice_no: Optional[str] = None
     notes: Optional[str] = None
+
 
 class SettingRequest(BaseModel):
     key: str
     value: str
 
+
+class RestoreRequest(BaseModel):
+    username: Optional[str] = "admin"
+
+
 # ----------------- AUTH ENDPOINTS -----------------
 @app.post("/api/login")
 def login(req: LoginRequest):
-    user = authenticate_user(req.username, req.password)
+    try:
+        user = gsheets_db.authenticate_user(req.username, req.password)
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database connection unavailable: {str(e)}. Configure GOOGLE_SERVICE_ACCOUNT_JSON in Vercel Environment Variables."
+        )
+
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    # Auto-sync inventory & metadata from Google Sheets on every login
+    sync_info = {}
+    try:
+        sync_info = gsheets_db.sync_from_sheets()
+    except Exception as e:
+        print(f"[LOGIN SYNC WARNING] {e}")
+
     return {
         "success": True,
-        "user": {
-            "id": user["id"],
-            "username": user["username"],
-            "full_name": user["full_name"],
-            "role": user["role"]
-        }
+        "user": user,
+        "sync_info": sync_info
     }
 
+
 @app.get("/api/users")
-def list_users(role: str = "admin"):
-    return {"users": get_all_users()}
+def list_users(refresh: int = Query(0)):
+    return {"users": gsheets_db.get_all_users(force_refresh=bool(refresh))}
+
 
 @app.post("/api/users")
 def add_user(req: CreateUserRequest):
-    ok, msg = create_user(req.username, req.password, req.full_name, req.role)
+    ok, msg = gsheets_db.create_user(req.username, req.password, req.full_name, req.role)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}
 
+
 @app.delete("/api/users/{user_id}")
 def remove_user(user_id: int):
-    ok, msg = delete_user(user_id)
+    ok, msg = gsheets_db.delete_user(user_id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}
+
 
 # ----------------- VISION & SCANNING ENDPOINTS -----------------
 @app.post("/api/scan-slip")
 async def scan_slip(file: UploadFile = File(...)):
     image_bytes = await file.read()
-    result = parse_slip_image(image_bytes)
-    return result
+    return parse_slip_image(image_bytes)
+
 
 @app.post("/api/scan-bill")
 async def scan_bill(file: UploadFile = File(...)):
     image_bytes = await file.read()
-    result = parse_bill_image(image_bytes)
-    return result
+    return parse_bill_image(image_bytes)
+
 
 @app.get("/api/lookup/{ln_code}")
 def lookup_code(ln_code: str):
@@ -123,14 +150,15 @@ def lookup_code(ln_code: str):
         return {"found": True, "item": res}
     return {"found": False, "message": f"Code {ln_code} not found in catalog"}
 
-# ----------------- INVENTORY & BATCH ENDPOINTS -----------------
+
+# ----------------- INVENTORY, SYNC & BACKUP ENDPOINTS -----------------
 @app.post("/api/process-batch")
 def process_batch(req: ProcessBatchRequest):
     if req.action not in ["IN", "OUT", "CAME_IN_AND_WENT_OUT"]:
         raise HTTPException(status_code=400, detail="Invalid action type")
-    
+
     items_dict = [it.dict() for it in req.items]
-    ok, details = process_stock_batch(
+    ok, details = gsheets_db.process_stock_batch(
         employee_username=req.username,
         action=req.action,
         source=req.source,
@@ -141,85 +169,118 @@ def process_batch(req: ProcessBatchRequest):
     if not ok:
         raise HTTPException(status_code=500, detail=str(details))
 
-    # Synchronous mirror to Google Sheets (vital on Vercel so serverless does not freeze before sync)
-    gsheet_synced = False
-    gsheet_msg = ""
-    try:
-        gsheet_synced, gsheet_msg = gsheets.sync_batch(
-            employee_username=req.username,
-            action=req.action,
-            source=req.source,
-            processed_items=details,
-            invoice_no=req.invoice_no,
-            notes=req.notes
-        )
-    except Exception as e:
-        print(f"[GSHEET INLINE SYNC ERROR] {e}")
-
     return {
         "success": True,
         "processed": details,
-        "gsheet_synced": gsheet_synced,
-        "gsheet_message": gsheet_msg
+        "gsheet_synced": True,
+        "gsheet_message": "Saved permanently to Google Sheets",
+        "synced_at": gsheets_db.get_last_synced_at()
     }
 
-@app.post("/api/sync-gsheets")
-def manual_sync_gsheets():
-    ok, msg = gsheets.sync_full_inventory()
-    if not ok:
-        raise HTTPException(status_code=500, detail=msg)
-    return {
-        "success": True,
-        "message": msg,
-        "sheet_id": gsheets.spreadsheet_id
-    }
+
+@app.post("/api/sync-from-sheets")
+def sync_from_sheets():
+    try:
+        info = gsheets_db.sync_from_sheets(include_logs=True)
+        return {
+            "success": True,
+            "message": f"Synced {info['inventory_count']} items ({info['total_units']} units) from Google Sheet",
+            "sync_info": info
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
 
 @app.get("/api/inventory")
-def get_inventory(search: str = ""):
-    return {"inventory": get_inventory_list(search)}
+def get_inventory(search: str = "", refresh: int = Query(0)):
+    items = gsheets_db.get_inventory_list(search=search, force_refresh=bool(refresh))
+    return {
+        "inventory": items,
+        "synced_at": gsheets_db.get_last_synced_at(),
+        "sheet_id": gsheets_db.spreadsheet_id,
+        "storage_mode": "google_sheets_primary"
+    }
+
 
 @app.get("/api/logs")
-def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[str] = None):
-    return {"logs": get_audit_logs(limit=limit, action=action, employee=employee)}
+def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[str] = None, refresh: int = Query(0)):
+    return {
+        "logs": gsheets_db.get_audit_logs(
+            limit=limit, action=action, employee=employee, force_refresh=bool(refresh)
+        )
+    }
+
+
+@app.get("/api/backups")
+def list_backups():
+    try:
+        return {"success": True, **gsheets_db.get_backup_summary()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/backup-now")
+def backup_now():
+    ok, msg, details = gsheets_db.create_backup_snapshot(trigger="MANUAL")
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"success": True, "message": msg, "backup": details}
+
+
+@app.post("/api/restore-backup")
+def restore_backup(req: RestoreRequest):
+    ok, msg = gsheets_db.restore_from_backup_latest(restored_by=req.username or "admin")
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"success": True, "message": msg}
+
 
 @app.get("/api/export-excel")
 def download_excel():
     temp_dir = tempfile.gettempdir()
     excel_path = os.path.join(temp_dir, "Godrej_Inventory_Export.xlsx")
-    export_inventory_excel(excel_path)
+    gsheets_db.export_inventory_excel(excel_path)
     return FileResponse(
         excel_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="Godrej_Inventory_Live.xlsx"
     )
 
+
 # ----------------- SETTINGS ENDPOINTS -----------------
 @app.get("/api/settings")
 def get_app_settings():
-    is_configured = bool(os.getenv("GROQ_API_KEY") or get_setting("groq_api_key"))
-    gsheet_ok, gsheet_msg = gsheets.connect()
+    is_groq_configured = bool(os.getenv("GROQ_API_KEY") or gsheets_db.get_setting("groq_api_key"))
+    gsheet_ok, gsheet_msg = gsheets_db.connect()
+    last_backup = gsheets_db.get_setting("last_backup_at", "Never") if gsheet_ok else "Unavailable"
     return {
-        "is_groq_configured": is_configured,
-        "groq_status": "Active & Encrypted in .env" if is_configured else "Not Set",
+        "is_groq_configured": is_groq_configured,
+        "groq_status": "Active & Secured" if is_groq_configured else "Not Set",
         "is_gsheet_configured": gsheet_ok,
         "gsheet_status": gsheet_msg,
-        "gsheet_id": gsheets.spreadsheet_id,
+        "gsheet_id": gsheets_db.spreadsheet_id,
+        "storage_mode": "Google Sheets Primary (Persistent)",
+        "synced_at": gsheets_db.get_last_synced_at(),
+        "last_backup_at": last_backup,
         "total_catalog_items": len(catalog.items)
     }
 
+
 @app.post("/api/settings")
 def update_app_settings(req: SettingRequest):
-    set_setting(req.key, req.value.strip())
-    return {"success": True, "message": f"Setting {req.key} updated successfully"}
+    gsheets_db.set_setting(req.key, req.value.strip())
+    return {"success": True, "message": f"Setting {req.key} saved permanently to Google Sheets"}
+
 
 # ----------------- STATIC ASSETS -----------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(static_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+
 @app.get("/")
 def serve_index():
     index_file = os.path.join(static_dir, "index.html")
     if os.path.exists(index_file):
         return FileResponse(index_file)
-    return {"message": "Godrej Inventory API is running. UI is initializing..."}
+    return {"message": "Godrej Inventory API is running."}
