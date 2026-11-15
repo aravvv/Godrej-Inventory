@@ -192,8 +192,13 @@ def sync_from_sheets():
 
 
 @app.get("/api/inventory")
-def get_inventory(search: str = "", refresh: int = Query(0)):
-    items = gsheets_db.get_inventory_list(search=search, force_refresh=bool(refresh))
+def get_inventory(search: str = "", refresh: int = Query(0), role: str = Query("employee")):
+    include_prices = (role or "").strip().lower() == "admin"
+    items = gsheets_db.get_inventory_list(
+        search=search,
+        force_refresh=bool(refresh),
+        include_prices=include_prices
+    )
     return {
         "inventory": items,
         "synced_at": gsheets_db.get_last_synced_at(),
@@ -236,10 +241,12 @@ def restore_backup(req: RestoreRequest):
 
 
 @app.get("/api/export-excel")
-def download_excel():
+def download_excel(role: str = Query("employee")):
+    include_prices = (role or "").strip().lower() == "admin"
     temp_dir = tempfile.gettempdir()
-    excel_path = os.path.join(temp_dir, "Godrej_Inventory_Export.xlsx")
-    gsheets_db.export_inventory_excel(excel_path)
+    suffix = "Admin" if include_prices else "Staff"
+    excel_path = os.path.join(temp_dir, f"Godrej_Inventory_Export_{suffix}.xlsx")
+    gsheets_db.export_inventory_excel(excel_path, include_prices=include_prices)
     return FileResponse(
         excel_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

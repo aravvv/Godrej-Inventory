@@ -165,7 +165,7 @@
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                 <span>Refresh from Sheet</span>
               </button>
-              <a href="/api/export-excel" class="btn btn-secondary btn-sm" download title="Download Excel Spreadsheet">
+              <a id="empExcelLink" href="/api/export-excel?role=employee" class="btn btn-secondary btn-sm" download title="Download Excel Spreadsheet">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                 <span>Excel</span>
               </a>
@@ -192,7 +192,7 @@
           <div style="margin-top: 1rem;">
             <div class="search-input-wrapper">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input type="text" id="empInventorySearchInput" class="glass-input search-input" placeholder="Search by LN code, Product name, SKU, or Category..." oninput="App.filterEmpInventory()">
+              <input type="text" id="empInventorySearchInput" class="glass-input search-input" placeholder="Search by LN code, Product name, Category, or Sub-cat..." oninput="App.filterEmpInventory()">
             </div>
             <div class="filter-pills-row">
               <button class="filter-pill active" onclick="App.setInventoryFilter('all', this)">All Items</button>
@@ -207,6 +207,7 @@
           <div id="empInventoryList" class="emp-inventory-grid">
             <div class="loading-placeholder">Loading inventory...</div>
           </div>
+          <div id="empInventoryPagination" class="pagination-wrap"></div>
         </div>
       </section>
 
@@ -313,13 +314,13 @@
         <!-- Admin Tab 1: Live Inventory -->
         <div id="inventoryTab" class="admin-content active">
           <div class="inventory-toolbar">
-            <input type="text" id="inventorySearchInput" placeholder="Search by LN code, SKU, or Description..." oninput="App.filterInventory()">
+            <input type="text" id="inventorySearchInput" placeholder="Search by LN code, Description, or Category..." oninput="App.filterInventory()">
             <div style="display:flex; gap:0.5rem; align-items:center;">
               <button class="btn btn-secondary btn-sm" onclick="App.refreshFromSheets(this)" title="Pull latest live counts directly from Google Sheet">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                 <span>Refresh from Sheet</span>
               </button>
-              <a href="/api/export-excel" class="btn btn-secondary btn-sm" download>
+              <a href="/api/export-excel?role=admin" class="btn btn-secondary btn-sm" download>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                 <span>Download Excel</span>
               </a>
@@ -334,14 +335,16 @@
                   <th>Stock</th>
                   <th>Category</th>
                   <th>Dealer Price</th>
+                  <th>Consumer Price</th>
                   <th>Last Modified</th>
                 </tr>
               </thead>
               <tbody id="inventoryTableBody">
-                <tr><td colspan="6" class="text-center">Loading inventory...</td></tr>
+                <tr><td colspan="7" class="text-center">Loading inventory...</td></tr>
               </tbody>
             </table>
           </div>
+          <div id="adminInventoryPagination" class="pagination-wrap"></div>
         </div>
 
         <!-- Admin Tab 2: Audit Logs -->

@@ -6,6 +6,12 @@ const App = {
     currentMethod: "SLIP", // 'SLIP', 'BILL'
     stagedBatch: [],
     inventoryData: [],
+    empPageSize: 60,
+    empVisibleCount: 60,
+    adminPageSize: 100,
+    adminVisibleCount: 100,
+    searchDebounceTimer: null,
+    adminSearchDebounceTimer: null,
     audioCtx: null
   },
 
@@ -503,7 +509,7 @@ const App = {
           <div class="staged-name">${this.escapeHtml(it.description)}</div>
           <div class="staged-meta">
             <span class="staged-code">${it.ln_code}</span>
-            ${it.dealer_price ? `<span>• ₹${it.dealer_price.toLocaleString('en-IN')}</span>` : ''}
+            ${(this.state.currentUser?.role === 'admin' && it.dealer_price) ? `<span>• ₹${it.dealer_price.toLocaleString('en-IN')}</span>` : ''}
             ${!it.catalog_match ? `<span style="color:#f59e0b;font-weight:600;">(Unlisted)</span>` : ''}
           </div>
         </div>
@@ -602,11 +608,17 @@ const App = {
   async loadInventory(forceRefresh = false) {
     const tbody = document.getElementById("inventoryTableBody");
     const empContainer = document.getElementById("empInventoryList");
-    if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="text-center">Loading inventory from Google Sheets...</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center">Loading inventory from Google Sheets...</td></tr>`;
     if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder">Loading inventory from Google Sheets...</div>`;
 
+    this.state.empVisibleCount = this.state.empPageSize;
+    this.state.adminVisibleCount = this.state.adminPageSize;
+
     try {
-      const url = forceRefresh ? "/api/inventory?refresh=1" : "/api/inventory";
+      const role = this.state.currentUser?.role === "admin" ? "admin" : "employee";
+      const empExcelLink = document.getElementById("empExcelLink");
+      if (empExcelLink) empExcelLink.href = `/api/export-excel?role=${encodeURIComponent(role)}`;
+      const url = `/api/inventory?role=${encodeURIComponent(role)}${forceRefresh ? "&refresh=1" : ""}`;
       const res = await fetch(url);
       const data = await res.json();
       this.state.inventoryData = data.inventory || [];
@@ -624,16 +636,20 @@ const App = {
       }
       this.updateSyncBadge({ inventory_count: this.state.inventoryData.length, synced_at: data.synced_at });
 
-      this.renderInventoryTable(this.state.inventoryData);
-      this.filterEmpInventory();
+      this.applyAdminFilter(true);
+      this.applyEmpFilter(true);
     } catch (e) {
-      if (tbody) tbody.innerHTML = `<tr><td colspan="6" class="text-center" style="color:#f43f5e">Failed to load inventory</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:#f43f5e">Failed to load inventory</td></tr>`;
       if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder" style="color:#f43f5e">Failed to load inventory</div>`;
     }
   },
 
-  renderEmployeeInventory(items) {
+  renderEmployeeInventory(items, resetWindow = false) {
+    if (resetWindow) {
+      this.state.empVisibleCount = this.state.empPageSize;
+    }
     const container = document.getElementById("empInventoryList");
+    const pagWrap = document.getElementById("empInventoryPagination");
     if (!container) return;
 
     if (items.length === 0) {
@@ -644,15 +660,34 @@ const App = {
           <span style="font-size:0.85rem;color:var(--text-muted);">Try a different search or scan IN incoming items</span>
         </div>
       `;
+      if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
 
-    container.innerHTML = items.map(it => {
+    const visible = items.slice(0, this.state.empVisibleCount);
+    const isAdmin = this.state.currentUser?.role === "admin";
+
+    container.innerHTML = visible.map(it => {
       const stock = Number(it.current_stock || 0);
       const isPositive = stock > 0;
-      const stockBadge = isPositive 
+      const stockBadge = isPositive
         ? `<span class="stock-badge in-stock">${stock} IN STOCK</span>`
         : `<span class="stock-badge out-stock">0 STOCK</span>`;
+
+      const priceHtml = isAdmin
+        ? `
+            <div class="price-group">
+              <div class="price-box">
+                <span class="price-lbl">Dealer Price</span>
+                <span class="price-val">${it.dealer_price != null ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</span>
+              </div>
+              <div class="price-box">
+                <span class="price-lbl">Consumer Price</span>
+                <span class="price-val">${it.consumer_price != null ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</span>
+              </div>
+            </div>
+          `
+        : "";
 
       return `
         <div class="emp-inventory-card">
@@ -665,14 +700,10 @@ const App = {
             <div class="emp-inv-meta">
               <span class="meta-tag cat-tag">${this.escapeHtml(it.category || 'Godrej Interio')}</span>
               ${it.sub_cat ? `<span class="meta-tag subcat-tag">${this.escapeHtml(it.sub_cat)}</span>` : ''}
-              ${it.sku ? `<span class="meta-tag sku-tag">SKU: ${this.escapeHtml(it.sku)}</span>` : ''}
             </div>
           </div>
           <div class="emp-inv-footer">
-            <div class="price-box">
-              <span class="price-lbl">Dealer Price</span>
-              <span class="price-val">₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}</span>
-            </div>
+            ${priceHtml}
             <div class="updated-box">
               <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
               <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
@@ -681,6 +712,25 @@ const App = {
         </div>
       `;
     }).join("");
+
+    if (pagWrap) {
+      const remaining = items.length - visible.length;
+      if (remaining > 0) {
+        pagWrap.innerHTML = `
+          <div class="pagination-meta">Showing ${visible.length} of ${items.length} items</div>
+          <button class="btn-load-more" onclick="App.loadMoreEmpInventory()">Load ${Math.min(remaining, this.state.empPageSize)} More (${remaining} remaining)</button>
+        `;
+      } else if (items.length > this.state.empPageSize) {
+        pagWrap.innerHTML = `<div class="pagination-meta">Showing all ${items.length} items</div>`;
+      } else {
+        pagWrap.innerHTML = "";
+      }
+    }
+  },
+
+  loadMoreEmpInventory() {
+    this.state.empVisibleCount += this.state.empPageSize;
+    this.applyEmpFilter(false);
   },
 
   setInventoryFilter(filterType, btnEl) {
@@ -689,10 +739,10 @@ const App = {
       btnEl.parentElement.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
       btnEl.classList.add("active");
     }
-    this.filterEmpInventory();
+    this.applyEmpFilter(true);
   },
 
-  filterEmpInventory() {
+  applyEmpFilter(resetWindow = true) {
     const input = document.getElementById("empInventorySearchInput");
     const query = input ? input.value.trim().toLowerCase() : "";
     const filterType = this.state.inventoryFilter || "all";
@@ -708,15 +758,22 @@ const App = {
 
     // Filter by query
     if (query) {
-      list = list.filter(it => 
+      list = list.filter(it =>
         (it.ln_code && it.ln_code.toLowerCase().includes(query)) ||
         (it.description && it.description.toLowerCase().includes(query)) ||
-        (it.sku && it.sku.toLowerCase().includes(query)) ||
-        (it.category && it.category.toLowerCase().includes(query))
+        (it.category && it.category.toLowerCase().includes(query)) ||
+        (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
       );
     }
 
-    this.renderEmployeeInventory(list);
+    this.renderEmployeeInventory(list, resetWindow);
+  },
+
+  filterEmpInventory() {
+    clearTimeout(this.state.searchDebounceTimer);
+    this.state.searchDebounceTimer = setTimeout(() => {
+      this.applyEmpFilter(true);
+    }, 120);
   },
 
   async refreshFromSheets(btnEl, silent = false) {
@@ -752,33 +809,68 @@ const App = {
     }
   },
 
-  renderInventoryTable(items) {
+  renderInventoryTable(items, resetWindow = false) {
+    if (resetWindow) {
+      this.state.adminVisibleCount = this.state.adminPageSize;
+    }
     const tbody = document.getElementById("inventoryTableBody");
+    const pagWrap = document.getElementById("adminInventoryPagination");
     if (items.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="6" class="text-center">No inventory records found yet. Scan IN items to start.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center">No inventory records found yet. Scan IN items to start.</td></tr>`;
+      if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
 
-    tbody.innerHTML = items.map(it => `
+    const visible = items.slice(0, this.state.adminVisibleCount);
+    const isAdmin = this.state.currentUser?.role === "admin";
+    tbody.innerHTML = visible.map(it => `
       <tr>
         <td style="font-family:monospace;font-weight:700;color:#38bdf8;">${it.ln_code}</td>
         <td><strong>${this.escapeHtml(it.description)}</strong></td>
         <td><span style="font-size:1.1rem;font-weight:800;color:${it.current_stock > 0 ? '#10b981' : '#f43f5e'}">${it.current_stock}</span></td>
         <td>${this.escapeHtml(it.category || 'General')}</td>
-        <td>₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}</td>
-        <td style="font-size:0.8rem;color:#94a3b8;">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${it.last_updated_by || 'system'})</td>
+        <td>${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+        <td>${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+        <td style="font-size:0.8rem;color:#94a3b8;">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
       </tr>
     `).join("");
+
+    if (pagWrap) {
+      const remaining = items.length - visible.length;
+      if (remaining > 0) {
+        pagWrap.innerHTML = `
+          <div class="pagination-meta">Showing ${visible.length} of ${items.length} items</div>
+          <button class="btn-load-more" onclick="App.loadMoreAdminInventory()">Load ${Math.min(remaining, this.state.adminPageSize)} More (${remaining} remaining)</button>
+        `;
+      } else if (items.length > this.state.adminPageSize) {
+        pagWrap.innerHTML = `<div class="pagination-meta">Showing all ${items.length} items</div>`;
+      } else {
+        pagWrap.innerHTML = "";
+      }
+    }
+  },
+
+  loadMoreAdminInventory() {
+    this.state.adminVisibleCount += this.state.adminPageSize;
+    this.applyAdminFilter(false);
+  },
+
+  applyAdminFilter(resetWindow = true) {
+    const query = (document.getElementById("inventorySearchInput")?.value || "").trim().toLowerCase();
+    const filtered = this.state.inventoryData.filter(it =>
+      it.ln_code.toLowerCase().includes(query) ||
+      (it.description && it.description.toLowerCase().includes(query)) ||
+      (it.category && it.category.toLowerCase().includes(query)) ||
+      (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
+    );
+    this.renderInventoryTable(filtered, resetWindow);
   },
 
   filterInventory() {
-    const query = document.getElementById("inventorySearchInput").value.toLowerCase();
-    const filtered = this.state.inventoryData.filter(it => 
-      it.ln_code.toLowerCase().includes(query) ||
-      (it.description && it.description.toLowerCase().includes(query)) ||
-      (it.sku && it.sku.toLowerCase().includes(query))
-    );
-    this.renderInventoryTable(filtered);
+    clearTimeout(this.state.adminSearchDebounceTimer);
+    this.state.adminSearchDebounceTimer = setTimeout(() => {
+      this.applyAdminFilter(true);
+    }, 120);
   },
 
   async loadAuditLogs(forceRefresh = false) {

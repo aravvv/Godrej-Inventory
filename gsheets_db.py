@@ -15,6 +15,8 @@ from google.oauth2.service_account import Credentials
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
+from catalog import catalog
+
 # Load .env from project root if present
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(ROOT_DIR, ".env"))
@@ -25,12 +27,13 @@ SCOPES = [
 ]
 
 DEFAULT_SHEET_ID = "1BF1RgdQVmffReUPSHnKoE-N_jQqmx02OOVXtNlxQ2sc"
-CACHE_TTL_SECONDS = 30
+CACHE_TTL_SECONDS = 60
+MAX_BACKUP_HISTORY_ROWS = 3000
 
 # Exact worksheet schemas
 INVENTORY_HEADERS = [
-    "LN Code", "Product Description", "SKU", "Category", "Sub Cat",
-    "Current Stock", "Dealer Price (Rs)", "Consumer Price (Rs)",
+    "LN Code", "Product Description", "Category", "Sub Cat",
+    "Current Stock", "Consumer Price (Rs)",
     "Last Updated", "Last Modified By"
 ]
 
@@ -49,8 +52,8 @@ SETTINGS_HEADERS = [
 ]
 
 BACKUP_HISTORY_HEADERS = [
-    "Backup ID", "Backup Date", "LN Code", "Product Description", "SKU",
-    "Category", "Sub Cat", "Current Stock", "Dealer Price (Rs)",
+    "Backup ID", "Backup Date", "LN Code", "Product Description",
+    "Category", "Sub Cat", "Current Stock",
     "Consumer Price (Rs)", "Last Updated By"
 ]
 
@@ -168,29 +171,123 @@ class GSheetsPrimaryDB:
                 self._ws_cache[title] = self.sheet.worksheet(title)
             return self._ws_cache[title]
 
+    # ----------------- RETRY & WORKSHEET MIGRATION -----------------
+    def _is_transient_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            return True
+        resp = getattr(exc, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status in (429, 500, 502, 503):
+            return True
+        msg = str(exc).lower()
+        return any(
+            tok in msg
+            for tok in (
+                "429", "500", "502", "503",
+                "quota", "rate limit", "timed out", "timeout",
+                "connection reset", "temporarily unavailable"
+            )
+        )
+
+    def _retry_api(self, fn, *args, **kwargs):
+        last_exc = None
+        for attempt in range(3):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2 and self._is_transient_error(exc):
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
+                raise
+        raise last_exc
+
     def _ensure_worksheets_exist(self):
-        worksheets = {ws.title: ws for ws in self.sheet.worksheets()}
+        worksheets = {ws.title: ws for ws in self._retry_api(self.sheet.worksheets)}
         self._ws_cache = worksheets.copy()
 
         def ensure_tab(title, headers, rows=1000):
             created_now = False
             if title not in worksheets:
-                ws = self.sheet.add_worksheet(title=title, rows=rows, cols=len(headers))
-                ws.append_row(headers)
+                ws = self._retry_api(self.sheet.add_worksheet, title=title, rows=rows, cols=len(headers))
+                self._retry_api(ws.append_row, headers)
                 worksheets[title] = ws
                 self._ws_cache[title] = ws
                 created_now = True
             return worksheets[title], created_now
 
-        ensure_tab("Live_Inventory", INVENTORY_HEADERS, rows=2000)
+        def migrate_tab_schema(ws, target_headers):
+            """Non-destructively migrates worksheet columns by header name to target_headers."""
+            raw = self._retry_api(ws.get_all_values)
+            if not raw:
+                self._retry_api(ws.append_row, target_headers)
+                return
+            current_headers = [str(h).strip() for h in raw[0]]
+            if current_headers == target_headers:
+                return
+
+            header_map = {}
+            for idx, h in enumerate(current_headers):
+                key = h.lower()
+                if key and key not in header_map:
+                    header_map[key] = idx
+
+            alias_map = {
+                "ln code": ["ln_code"],
+                "product description": ["description"],
+                "sub cat": ["sub_cat"],
+                "current stock": ["stock", "current_stock"],
+                "consumer price (rs)": ["consumer price", "consumer_price"],
+                "last updated": ["last_updated"],
+                "last modified by": ["last updated by", "last_updated_by"],
+                "last updated by": ["last modified by", "last_updated_by"],
+            }
+
+            col_sources = []
+            for th in target_headers:
+                key = th.lower()
+                src_idx = header_map.get(key)
+                if src_idx is None:
+                    for alias in alias_map.get(key, []):
+                        if alias in header_map:
+                            src_idx = header_map[alias]
+                            break
+                col_sources.append(src_idx)
+
+            migrated_rows = [target_headers]
+            for r in raw[1:]:
+                if not r or not any(str(c).strip() for c in r):
+                    continue
+                new_row = [
+                    r[src_idx] if (src_idx is not None and src_idx < len(r)) else ""
+                    for src_idx in col_sources
+                ]
+                migrated_rows.append(new_row)
+
+            self._retry_api(ws.clear)
+            self._retry_api(ws.update, migrated_rows, "A1")
+            try:
+                if getattr(ws, "col_count", len(target_headers)) != len(target_headers):
+                    ws.resize(cols=len(target_headers))
+            except Exception:
+                pass
+
+        inv_ws, inv_created = ensure_tab("Live_Inventory", INVENTORY_HEADERS, rows=2000)
         ensure_tab("Audit_Log", AUDIT_HEADERS, rows=5000)
         users_ws, users_created = ensure_tab("Users", USERS_HEADERS, rows=200)
         ensure_tab("Settings", SETTINGS_HEADERS, rows=100)
-        ensure_tab("Backup_Latest", INVENTORY_HEADERS, rows=2000)
-        ensure_tab("Backup_History", BACKUP_HISTORY_HEADERS, rows=5000)
+        latest_ws, latest_created = ensure_tab("Backup_Latest", INVENTORY_HEADERS, rows=2000)
+        hist_ws, hist_created = ensure_tab("Backup_History", BACKUP_HISTORY_HEADERS, rows=5000)
+
+        if not inv_created:
+            migrate_tab_schema(inv_ws, INVENTORY_HEADERS)
+        if not latest_created:
+            migrate_tab_schema(latest_ws, INVENTORY_HEADERS)
+        if not hist_created:
+            migrate_tab_schema(hist_ws, BACKUP_HISTORY_HEADERS)
 
         # Ensure Users sheet has at least admin seeded (or migrated from local sqlite once)
-        existing_users = users_ws.get_all_values()
+        existing_users = self._retry_api(users_ws.get_all_values)
         if users_created or len(existing_users) <= 1:
             self._seed_initial_users(users_ws)
 
@@ -224,7 +321,7 @@ class GSheetsPrimaryDB:
             ])
 
         if seed_rows:
-            users_ws.append_rows(seed_rows)
+            self._retry_api(users_ws.append_rows, seed_rows)
 
     def _invalidate_cache(self, *keys):
         if not keys:
@@ -272,7 +369,7 @@ class GSheetsPrimaryDB:
                 return dict(cached["data"])
 
             ws = self._get_ws("Settings")
-            rows = ws.get_all_values()
+            rows = self._retry_api(ws.get_all_values)
             data = {}
             for r in rows[1:]:
                 if len(r) >= 2 and r[0].strip():
@@ -291,7 +388,7 @@ class GSheetsPrimaryDB:
     def set_setting(self, key: str, value: str):
         with self._lock:
             ws = self._get_ws("Settings")
-            rows = ws.get_all_values()
+            rows = self._retry_api(ws.get_all_values)
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             key_clean = key.strip()
 
@@ -302,9 +399,9 @@ class GSheetsPrimaryDB:
                     break
 
             if found_row:
-                ws.update([[key_clean, value, now_str]], f"A{found_row}:C{found_row}")
+                self._retry_api(ws.update, [[key_clean, value, now_str]], f"A{found_row}:C{found_row}")
             else:
-                ws.append_row([key_clean, value, now_str])
+                self._retry_api(ws.append_row, [key_clean, value, now_str])
 
             self._cache["settings"]["data"][key_clean] = value
             self._cache["settings"]["ts"] = time.time()
@@ -322,7 +419,7 @@ class GSheetsPrimaryDB:
                 return list(cached["data"])
 
             ws = self._get_ws("Users")
-            rows = ws.get_all_values()
+            rows = self._retry_api(ws.get_all_values)
             users = []
             for row_idx, r in enumerate(rows[1:], start=2):
                 if not r or len(r) < 5 or not r[1].strip():
@@ -373,7 +470,7 @@ class GSheetsPrimaryDB:
             next_id = max((u["id"] for u in users), default=0) + 1
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ws = self._get_ws("Users")
-            ws.append_row([
+            self._retry_api(ws.append_row, [
                 next_id, uname, hash_password(password), full_name.strip(), role, 1, now_str
             ])
             self._invalidate_cache("users")
@@ -389,19 +486,19 @@ class GSheetsPrimaryDB:
                 return False, "Cannot delete primary admin account"
 
             ws = self._get_ws("Users")
-            ws.delete_rows(target["_row_idx"])
+            self._retry_api(ws.delete_rows, target["_row_idx"])
             self._invalidate_cache("users")
             return True, "User deleted permanently from Google Sheets"
 
     # ----------------- INVENTORY -----------------
-    def get_inventory_list(self, search: str = "", force_refresh: bool = False) -> list:
+    def get_inventory_list(self, search: str = "", force_refresh: bool = False, include_prices: bool = True) -> list:
         with self._lock:
             now = time.time()
             cached = self._cache["inventory"]
 
             if force_refresh or cached["ts"] == 0 or (now - cached["ts"]) >= CACHE_TTL_SECONDS:
                 ws = self._get_ws("Live_Inventory")
-                raw = ws.get_all_values()
+                raw = self._retry_api(ws.get_all_values)
                 items = []
                 by_ln = {}
 
@@ -416,14 +513,12 @@ class GSheetsPrimaryDB:
 
                     c_ln = col_idx(["ln code", "ln_code"], 0)
                     c_desc = col_idx(["product description", "description"], 1)
-                    c_sku = col_idx(["sku"], 2)
-                    c_cat = col_idx(["category"], 3)
-                    c_sub = col_idx(["sub cat", "sub_cat"], 4)
-                    c_stock = col_idx(["current stock", "stock", "current_stock"], 5)
-                    c_dp = col_idx(["dealer price (rs)", "dealer price", "dealer_price"], 6)
-                    c_cp = col_idx(["consumer price (rs)", "consumer price", "consumer_price"], 7)
-                    c_upd = col_idx(["last updated", "last_updated"], 8)
-                    c_by = col_idx(["last modified by", "last_updated_by"], 9)
+                    c_cat = col_idx(["category"], 2)
+                    c_sub = col_idx(["sub cat", "sub_cat"], 3)
+                    c_stock = col_idx(["current stock", "stock", "current_stock"], 4)
+                    c_cp = col_idx(["consumer price (rs)", "consumer price", "consumer_price"], 5)
+                    c_upd = col_idx(["last updated", "last_updated"], 6)
+                    c_by = col_idx(["last modified by", "last_updated_by"], 7)
 
                     def cell(row, idx, default=""):
                         return str(row[idx]).strip() if idx < len(row) and row[idx] is not None else default
@@ -432,15 +527,20 @@ class GSheetsPrimaryDB:
                         ln = cell(r, c_ln).upper()
                         if not ln:
                             continue
+                        cat_entry = catalog.lookup(ln)
+                        dealer_price = _to_float(cat_entry.get("dealer_price"), 0.0) if cat_entry else 0.0
+                        consumer_price = _to_float(cell(r, c_cp, "0"), 0.0)
+                        if consumer_price <= 0 and cat_entry:
+                            consumer_price = _to_float(cat_entry.get("consumer_price"), 0.0)
+
                         item = {
                             "ln_code": ln,
                             "description": cell(r, c_desc),
-                            "sku": cell(r, c_sku),
                             "category": cell(r, c_cat),
                             "sub_cat": cell(r, c_sub),
                             "current_stock": _to_int(cell(r, c_stock, "0"), 0),
-                            "dealer_price": _to_float(cell(r, c_dp, "0"), 0.0),
-                            "consumer_price": _to_float(cell(r, c_cp, "0"), 0.0),
+                            "dealer_price": dealer_price,
+                            "consumer_price": consumer_price,
                             "last_updated": cell(r, c_upd),
                             "last_updated_by": cell(r, c_by),
                             "_row_idx": row_num
@@ -464,10 +564,19 @@ class GSheetsPrimaryDB:
                     it for it in result
                     if q in it["ln_code"].lower()
                     or q in (it["description"] or "").lower()
-                    or q in (it["sku"] or "").lower()
                     or q in (it["category"] or "").lower()
+                    or q in (it["sub_cat"] or "").lower()
                 ]
-            return result
+            if include_prices:
+                return [dict(it) for it in result]
+
+            stripped = []
+            for it in result:
+                copy_it = dict(it)
+                copy_it["dealer_price"] = None
+                copy_it["consumer_price"] = None
+                stripped.append(copy_it)
+            return stripped
 
     def get_last_synced_at(self):
         return self._cache["inventory"].get("synced_at")
@@ -492,7 +601,11 @@ class GSheetsPrimaryDB:
 
                 # Always pull fresh inventory from Google Sheet before computing deltas
                 self.get_inventory_list(force_refresh=True)
-                by_ln = dict(self._cache["inventory"]["by_ln"])
+                by_ln = {ln: dict(it) for ln, it in self._cache["inventory"]["by_ln"].items()}
+                next_row_idx = max(
+                    (it.get("_row_idx") or 1 for it in self._cache["inventory"]["data"]),
+                    default=1
+                ) + 1
 
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 batch_updates = []  # For existing rows updated in-place
@@ -518,37 +631,45 @@ class GSheetsPrimaryDB:
 
                     desc = (item.get("description") or (existing["description"] if existing else "Unknown Product")).strip()
 
-                    if existing:
+                    if existing and existing.get("_row_idx"):
                         row_num = existing["_row_idx"]
-                        # Update Current Stock (F), Last Updated (I), Last Modified By (J) in exact row
+                        # Update Current Stock (E=5), Last Updated (G=7), Last Modified By (H=8) in exact row
                         batch_updates.append({
-                            "range": f"{rowcol_to_a1(row_num, 6)}",
+                            "range": f"{rowcol_to_a1(row_num, 5)}",
                             "values": [[stock_after]]
                         })
                         batch_updates.append({
-                            "range": f"{rowcol_to_a1(row_num, 9)}:{rowcol_to_a1(row_num, 10)}",
+                            "range": f"{rowcol_to_a1(row_num, 7)}:{rowcol_to_a1(row_num, 8)}",
                             "values": [[now_str, employee_username]]
                         })
                         # Keep working map consistent if same LN appears twice in one batch
                         existing["current_stock"] = stock_after
                         existing["last_updated"] = now_str
                         existing["last_updated_by"] = employee_username
+                    elif existing:
+                        # New LN already staged earlier in this same batch
+                        existing["current_stock"] = stock_after
+                        existing["last_updated"] = now_str
+                        existing["last_updated_by"] = employee_username
                     else:
-                        sku = item.get("sku", "")
-                        cat = item.get("category", "")
-                        sub_cat = item.get("sub_cat", "")
+                        cat_entry = catalog.lookup(ln)
+                        cat = (item.get("category") or (cat_entry.get("category") if cat_entry else "") or "").strip()
+                        sub_cat = (item.get("sub_cat") or (cat_entry.get("sub_cat") if cat_entry else "") or "").strip()
                         dp = _to_float(item.get("dealer_price", 0.0), 0.0)
+                        if dp <= 0 and cat_entry:
+                            dp = _to_float(cat_entry.get("dealer_price"), 0.0)
                         cp = _to_float(item.get("consumer_price", 0.0), 0.0)
+                        if cp <= 0 and cat_entry:
+                            cp = _to_float(cat_entry.get("consumer_price"), 0.0)
 
                         new_row = [
-                            ln, desc, sku, cat, sub_cat, stock_after, dp, cp, now_str, employee_username
+                            ln, desc, cat, sub_cat, stock_after, cp, now_str, employee_username
                         ]
                         new_rows.append(new_row)
-                        # Track temporarily in case same new LN appears twice in same batch
+                        # Track in working map in case same new LN appears twice in same batch
                         by_ln[ln] = {
                             "ln_code": ln,
                             "description": desc,
-                            "sku": sku,
                             "category": cat,
                             "sub_cat": sub_cat,
                             "current_stock": stock_after,
@@ -588,21 +709,32 @@ class GSheetsPrimaryDB:
 
                 # Update existing rows first (while row indices match), then append new items
                 if batch_updates:
-                    inv_ws.batch_update(batch_updates)
+                    self._retry_api(inv_ws.batch_update, batch_updates)
 
                 if new_rows:
                     dedup_new = {}
                     for nr in new_rows:
                         dedup_new[nr[0]] = nr
-                        dedup_new[nr[0]][5] = by_ln[nr[0]]["current_stock"]
-                    inv_ws.append_rows(list(dedup_new.values()))
+                        dedup_new[nr[0]][4] = by_ln[nr[0]]["current_stock"]
+                    append_list = list(dedup_new.values())
+                    self._retry_api(inv_ws.append_rows, append_list)
+                    for nr in append_list:
+                        by_ln[nr[0]]["_row_idx"] = next_row_idx
+                        next_row_idx += 1
 
                 if audit_rows:
-                    log_ws.append_rows(audit_rows)
+                    self._retry_api(log_ws.append_rows, audit_rows)
 
-                # Refresh cache from sheet (or invalidate so next read sees exact row numbers)
-                self._invalidate_cache("inventory", "audit_logs")
-                self.get_inventory_list(force_refresh=True)
+                # O(k) write-through cache update without re-reading entire sheet
+                updated_items = list(by_ln.values())
+                updated_items.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
+                self._cache["inventory"] = {
+                    "data": updated_items,
+                    "by_ln": by_ln,
+                    "ts": time.time(),
+                    "synced_at": now_str
+                }
+                self._invalidate_cache("audit_logs")
 
                 # Check lazy daily backup after transaction
                 try:
@@ -621,7 +753,7 @@ class GSheetsPrimaryDB:
             cached = self._cache["audit_logs"]
             if force_refresh or cached["ts"] == 0 or (now - cached["ts"]) >= CACHE_TTL_SECONDS:
                 ws = self._get_ws("Audit_Log")
-                raw = ws.get_all_values()
+                raw = self._retry_api(ws.get_all_values)
                 logs = []
                 for idx, r in enumerate(raw[1:], start=1):
                     if not r or len(r) < 6:
@@ -694,18 +826,16 @@ class GSheetsPrimaryDB:
                 latest_rows = [INVENTORY_HEADERS] + [[
                     it["ln_code"],
                     it["description"],
-                    it["sku"],
                     it["category"],
                     it["sub_cat"],
                     it["current_stock"],
-                    it["dealer_price"],
                     it["consumer_price"],
                     it["last_updated"],
                     it["last_updated_by"]
                 ] for it in items]
 
-                latest_ws.clear()
-                latest_ws.update(latest_rows, "A1")
+                self._retry_api(latest_ws.clear)
+                self._retry_api(latest_ws.update, latest_rows, "A1")
 
                 if items:
                     hist_rows = [[
@@ -713,15 +843,20 @@ class GSheetsPrimaryDB:
                         now_str,
                         it["ln_code"],
                         it["description"],
-                        it["sku"],
                         it["category"],
                         it["sub_cat"],
                         it["current_stock"],
-                        it["dealer_price"],
                         it["consumer_price"],
                         it["last_updated_by"]
                     ] for it in items]
-                    history_ws.append_rows(hist_rows)
+                    self._retry_api(history_ws.append_rows, hist_rows)
+
+                    # Cap Backup_History to newest MAX_BACKUP_HISTORY_ROWS data rows
+                    all_hist = self._retry_api(history_ws.get_all_values)
+                    if len(all_hist) > MAX_BACKUP_HISTORY_ROWS + 1:
+                        trimmed_hist = [BACKUP_HISTORY_HEADERS] + all_hist[1:][-MAX_BACKUP_HISTORY_ROWS:]
+                        self._retry_api(history_ws.clear)
+                        self._retry_api(history_ws.update, trimmed_hist, "A1")
 
                 self.set_setting("last_backup_at", now_str)
                 if trigger == "DAILY_AUTO":
@@ -740,16 +875,22 @@ class GSheetsPrimaryDB:
     def get_backup_summary(self):
         with self._lock:
             ws = self._get_ws("Backup_History")
-            raw = ws.get_all_values()
+            raw = self._retry_api(ws.get_all_values)
             settings = self.get_all_settings()
+
+            stock_col = 6
+            if raw and raw[0]:
+                hdrs = [h.strip().lower() for h in raw[0]]
+                if "current stock" in hdrs:
+                    stock_col = hdrs.index("current stock")
 
             grouped = {}
             for r in raw[1:]:
-                if not r or len(r) < 8 or not r[0].strip():
+                if not r or len(r) < 7 or not r[0].strip():
                     continue
                 bid = r[0].strip()
                 bdate = r[1].strip()
-                qty = _to_int(r[7], 0)
+                qty = _to_int(r[stock_col] if stock_col < len(r) else "0", 0)
                 if bid not in grouped:
                     grouped[bid] = {
                         "backup_id": bid,
@@ -776,15 +917,15 @@ class GSheetsPrimaryDB:
                 inv_ws = self._get_ws("Live_Inventory")
                 log_ws = self._get_ws("Audit_Log")
 
-                rows = latest_ws.get_all_values()
+                rows = self._retry_api(latest_ws.get_all_values)
                 if len(rows) <= 1:
                     return False, "Backup_Latest has no inventory rows to restore."
 
-                inv_ws.clear()
-                inv_ws.update(rows, "A1")
+                self._retry_api(inv_ws.clear)
+                self._retry_api(inv_ws.update, rows, "A1")
 
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log_ws.append_row([
+                self._retry_api(log_ws.append_row, [
                     f"RESTORE-{int(time.time())}",
                     now_str,
                     restored_by,
@@ -805,9 +946,9 @@ class GSheetsPrimaryDB:
                 return False, f"Restore failed: {str(e)}"
 
     # ----------------- EXCEL EXPORT -----------------
-    def export_inventory_excel(self, filepath: str):
+    def export_inventory_excel(self, filepath: str, include_prices: bool = True):
         """Generates a clean Excel workbook directly from Google Sheets Primary data."""
-        items = self.get_inventory_list(force_refresh=True)
+        items = self.get_inventory_list(force_refresh=True, include_prices=include_prices)
         logs = self.get_audit_logs(limit=500, force_refresh=True)
 
         wb = openpyxl.Workbook()
@@ -817,19 +958,37 @@ class GSheetsPrimaryDB:
         # Sheet 1: Live Inventory
         ws1 = wb.active
         ws1.title = "Live Inventory"
-        ws1.append(INVENTORY_HEADERS)
-        for col_num in range(1, len(INVENTORY_HEADERS) + 1):
+        if include_prices:
+            export_headers = [
+                "LN Code", "Product Description", "Category", "Sub Cat",
+                "Current Stock", "Dealer Price (Rs)", "Consumer Price (Rs)",
+                "Last Updated", "Last Modified By"
+            ]
+        else:
+            export_headers = [
+                "LN Code", "Product Description", "Category", "Sub Cat",
+                "Current Stock", "Last Updated", "Last Modified By"
+            ]
+        ws1.append(export_headers)
+        for col_num in range(1, len(export_headers) + 1):
             cell = ws1.cell(row=1, column=col_num)
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
         for item in items:
-            ws1.append([
-                item["ln_code"], item["description"], item["sku"], item["category"],
-                item["sub_cat"], item["current_stock"], item["dealer_price"],
-                item["consumer_price"], item["last_updated"], item["last_updated_by"]
-            ])
+            if include_prices:
+                ws1.append([
+                    item["ln_code"], item["description"], item["category"],
+                    item["sub_cat"], item["current_stock"], item["dealer_price"],
+                    item["consumer_price"], item["last_updated"], item["last_updated_by"]
+                ])
+            else:
+                ws1.append([
+                    item["ln_code"], item["description"], item["category"],
+                    item["sub_cat"], item["current_stock"],
+                    item["last_updated"], item["last_updated_by"]
+                ])
 
         # Sheet 2: Audit Log
         ws2 = wb.create_sheet("Audit History")
