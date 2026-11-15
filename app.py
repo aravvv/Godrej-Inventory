@@ -85,6 +85,11 @@ class RestoreRequest(BaseModel):
     username: Optional[str] = "admin"
 
 
+class DeleteInventoryBatchRequest(BaseModel):
+    ln_codes: List[str]
+    username: Optional[str] = "admin"
+
+
 # ----------------- AUTH ENDPOINTS -----------------
 @app.post("/api/login")
 def login(req: LoginRequest):
@@ -216,6 +221,19 @@ def get_inventory(search: str = "", refresh: int = Query(0), role: str = Query("
         "synced_at": gsheets_db.get_last_synced_at(),
         "sheet_id": gsheets_db.spreadsheet_id,
         "storage_mode": "google_sheets_primary"
+    }
+
+
+@app.post("/api/inventory/delete-batch")
+def delete_inventory_batch(req: DeleteInventoryBatchRequest):
+    ok, msg, deleted = gsheets_db.delete_inventory_batch(req.ln_codes, employee_username=req.username or "admin")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {
+        "success": True,
+        "message": msg,
+        "deleted": deleted,
+        "synced_at": gsheets_db.get_last_synced_at()
     }
 
 

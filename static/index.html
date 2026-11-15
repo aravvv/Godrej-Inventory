@@ -217,9 +217,10 @@
               <input type="text" id="empInventorySearchInput" class="glass-input search-input" placeholder="Search by LN code, product name, category, or sub-category..." oninput="App.filterEmpInventory()">
             </div>
             <div class="filter-pills-row">
-              <button class="filter-pill active" onclick="App.setInventoryFilter('all', this)">All Items</button>
-              <button class="filter-pill" onclick="App.setInventoryFilter('in_stock', this)">In Stock (&gt;0)</button>
-              <button class="filter-pill" onclick="App.setInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+              <button id="empFilterAll" class="filter-pill active" onclick="App.setInventoryFilter('all', this)">All Items</button>
+              <button id="empFilterInStock" class="filter-pill" onclick="App.setInventoryFilter('in_stock', this)">In Stock (&gt;0)</button>
+              <button id="empFilterOutStock" class="filter-pill" onclick="App.setInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+              <span class="selection-hint-text">Hold or right-click a product to select &amp; delete</span>
             </div>
           </div>
         </div>
@@ -347,6 +348,12 @@
               </a>
             </div>
           </div>
+          <div class="filter-pills-row" style="margin-bottom:0.85rem;">
+            <button id="adminFilterAll" class="filter-pill active" onclick="App.setAdminInventoryFilter('all', this)">All Items</button>
+            <button id="adminFilterInStock" class="filter-pill" onclick="App.setAdminInventoryFilter('in_stock', this)">In Stock (&gt;0)</button>
+            <button id="adminFilterOutStock" class="filter-pill" onclick="App.setAdminInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+            <span class="selection-hint-text">Hold or right-click a row to select &amp; delete</span>
+          </div>
           <div class="table-responsive">
             <table class="data-table">
               <thead>
@@ -358,11 +365,10 @@
                   <th>Dealer Price</th>
                   <th>Consumer Price</th>
                   <th>Last Modified</th>
-                  <th style="text-align:right;">Actions</th>
                 </tr>
               </thead>
               <tbody id="inventoryTableBody">
-                <tr><td colspan="8" class="text-center"><span class="ai-inline-loader"><span class="ai-pulse-dots"><span></span><span></span><span></span></span><span>Syncing inventory...</span></span></td></tr>
+                <tr><td colspan="7" class="text-center"><span class="ai-inline-loader"><span class="ai-pulse-dots"><span></span><span></span><span></span></span><span>Syncing inventory...</span></span></td></tr>
               </tbody>
             </table>
           </div>
@@ -520,29 +526,38 @@
       </div>
     </div>
 
+    <!-- Floating Selection Bar (Appears when holding or right-clicking a product) -->
+    <div id="selectionActionBar" class="selection-action-bar hidden">
+      <div class="selection-bar-left">
+        <span id="selectionCountBadge" class="selection-count-pill">1 Selected</span>
+        <button type="button" id="selectAllInventoryBtn" class="btn btn-secondary btn-sm" onclick="App.toggleSelectAllInventory()">Select All</button>
+      </div>
+      <div class="selection-bar-right">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="App.exitSelectionMode()">Cancel</button>
+        <button type="button" id="openDeleteSelectedBtn" class="btn btn-danger btn-sm" onclick="App.openDeleteSelectedModal()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          <span id="deleteSelectedBtnText">Delete (1)</span>
+        </button>
+      </div>
+    </div>
+
     <!-- Modal: Confirm Stock Deletion -->
     <div id="deleteStockModal" class="modal hidden">
       <div class="modal-card">
         <div class="modal-header">
           <h3 style="color:var(--color-out);display:flex;align-items:center;gap:0.45rem;">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-            <span>Confirm Stock Deletion</span>
+            <span id="deleteModalTitleText">Confirm Stock Deletion</span>
           </h3>
           <button class="btn-close" onclick="App.hideDeleteStockModal()">&times;</button>
         </div>
         <div class="delete-stock-summary">
-          <p style="font-size:0.84rem;color:var(--text-secondary);line-height:1.5;margin-bottom:0.85rem;">
-            Are you sure you want to permanently delete this item from <strong>Live_Inventory</strong> in Google Sheets?
+          <p id="deleteModalPromptText" style="font-size:0.84rem;color:var(--text-secondary);line-height:1.5;margin-bottom:0.85rem;">
+            Are you sure you want to permanently delete the selected product(s) from <strong>Live_Inventory</strong> in Google Sheets?
           </p>
-          <div class="delete-stock-item-box">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
-              <span id="deleteModalLnCode" class="emp-inv-code">LN_CODE</span>
-              <span id="deleteModalStockBadge" class="stock-badge out-stock">0 units</span>
-            </div>
-            <div id="deleteModalDesc" style="font-weight:600;font-size:0.9rem;margin-top:0.45rem;color:var(--text-main);">Product Description</div>
-          </div>
+          <div id="deleteModalItemsList" class="delete-modal-items-list"></div>
           <p style="font-size:0.76rem;color:var(--text-muted);margin-top:0.75rem;">
-            This action removes the row directly from the Google Sheet and logs a <code>DELETE</code> record in <strong>Audit_Log</strong>.
+            This action removes the selected row(s) directly from the Google Sheet and logs a <code>DELETE</code> record in <strong>Audit_Log</strong>.
           </p>
         </div>
         <div class="modal-actions">

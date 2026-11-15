@@ -12,6 +12,14 @@ const App = {
     adminVisibleCount: 100,
     searchDebounceTimer: null,
     adminSearchDebounceTimer: null,
+    inventoryFilter: "all",
+    adminInventoryFilter: "all",
+    selectionMode: false,
+    selectedLnCodes: [],
+    holdTimer: null,
+    holdStartX: 0,
+    holdStartY: 0,
+    justHeldLn: null,
     theme: "dark",
     audioCtx: null
   },
@@ -119,6 +127,9 @@ const App = {
   },
 
   showScreen(screenId) {
+    if (this.state.selectionMode) {
+      this.exitSelectionMode();
+    }
     document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
     const target = document.getElementById(screenId);
     if (target) {
@@ -640,9 +651,29 @@ const App = {
     const content = document.getElementById(tabId);
     if (content) content.classList.add("active");
 
+    if (tabId !== "inventoryTab" && this.state.selectionMode) {
+      this.exitSelectionMode();
+    }
     if (tabId === "backupsTab") this.loadBackups();
     if (tabId === "logsTab") this.loadAuditLogs(true);
     if (tabId === "usersTab") this.loadUsers(true);
+  },
+
+  updateFilterPillCounts() {
+    const all = this.state.inventoryData || [];
+    const inStockCount = all.filter(it => Number(it.current_stock || 0) > 0).length;
+    const outStockCount = all.filter(it => Number(it.current_stock || 0) <= 0).length;
+
+    const setTxt = (id, txt) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = txt;
+    };
+    setTxt("empFilterAll", `All Items (${all.length})`);
+    setTxt("empFilterInStock", `In Stock (${inStockCount})`);
+    setTxt("empFilterOutStock", `Out of Stock (${outStockCount})`);
+    setTxt("adminFilterAll", `All Items (${all.length})`);
+    setTxt("adminFilterInStock", `In Stock (${inStockCount})`);
+    setTxt("adminFilterOutStock", `Out of Stock (${outStockCount})`);
   },
 
   async loadInventory(forceRefresh = false) {
@@ -674,9 +705,11 @@ const App = {
         subEl.textContent = `Google Sheets Primary • Synced ${data.synced_at.slice(11, 19)}`;
       }
       this.updateSyncBadge({ inventory_count: this.state.inventoryData.length, synced_at: data.synced_at });
+      this.updateFilterPillCounts();
 
       this.applyAdminFilter(true);
       this.applyEmpFilter(true);
+      this.updateSelectionBarUI();
     } catch (e) {
       if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--color-out)">Failed to load inventory</td></tr>`;
       if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder" style="color:var(--color-out)">Failed to load inventory</div>`;
@@ -704,13 +737,19 @@ const App = {
 
     const visible = items.slice(0, this.state.empVisibleCount);
     const isAdmin = this.state.currentUser?.role === "admin";
+    const selectedSet = new Set(this.state.selectedLnCodes || []);
 
     container.innerHTML = visible.map(it => {
       const stock = Number(it.current_stock || 0);
       const isPositive = stock > 0;
+      const isSelected = selectedSet.has(it.ln_code);
       const stockBadge = isPositive
         ? `<span class="stock-badge in-stock">${stock} in stock</span>`
         : `<span class="stock-badge out-stock">0 stock</span>`;
+
+      const selectIndicator = this.state.selectionMode
+        ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
+        : "";
 
       const priceHtml = isAdmin
         ? `
@@ -727,11 +766,21 @@ const App = {
           `
         : "";
 
+      const safeLn = this.escapeHtml(it.ln_code);
       return `
-        <div class="emp-inventory-card">
+        <div class="emp-inventory-card ${isSelected ? 'selected-item' : ''}" data-ln="${safeLn}"
+          oncontextmenu="App.handleItemContextMenu(event, '${safeLn}')"
+          onpointerdown="App.handleItemPointerDown(event, '${safeLn}')"
+          onpointerup="App.handleItemPointerUp(event)"
+          onpointercancel="App.handleItemPointerUp(event)"
+          onpointermove="App.handleItemPointerMove(event)"
+          onclick="App.handleItemClick(event, '${safeLn}')">
           <div>
             <div class="emp-inv-header">
-              <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
+              <div style="display:flex;align-items:center;gap:0.45rem;">
+                ${selectIndicator}
+                <span class="emp-inv-code">${safeLn}</span>
+              </div>
               ${stockBadge}
             </div>
             <div class="emp-inv-body">
@@ -744,15 +793,9 @@ const App = {
           </div>
           <div class="emp-inv-footer">
             ${priceHtml}
-            <div style="display:flex;align-items:center;gap:0.6rem;margin-left:auto;">
-              <div class="updated-box">
-                <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
-                <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
-              </div>
-              <button type="button" class="btn-delete-stock" onclick="App.openDeleteStockModal('${this.escapeHtml(it.ln_code)}')" title="Delete stock from Google Sheet">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                <span>Delete</span>
-              </button>
+            <div class="updated-box" style="margin-left:auto;">
+              <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
+              <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
             </div>
           </div>
         </div>
@@ -786,9 +829,10 @@ const App = {
       btnEl.classList.add("active");
     }
     this.applyEmpFilter(true);
+    this.updateSelectionBarUI();
   },
 
-  applyEmpFilter(resetWindow = true) {
+  getFilteredEmpList() {
     const input = document.getElementById("empInventorySearchInput");
     const query = input ? input.value.trim().toLowerCase() : "";
     const filterType = this.state.inventoryFilter || "all";
@@ -809,7 +853,11 @@ const App = {
         (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
       );
     }
+    return list;
+  },
 
+  applyEmpFilter(resetWindow = true) {
+    const list = this.getFilteredEmpList();
     this.renderEmployeeInventory(list, resetWindow);
   },
 
@@ -860,30 +908,40 @@ const App = {
     const tbody = document.getElementById("inventoryTableBody");
     const pagWrap = document.getElementById("adminInventoryPagination");
     if (items.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
       if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
 
     const visible = items.slice(0, this.state.adminVisibleCount);
     const isAdmin = this.state.currentUser?.role === "admin";
-    tbody.innerHTML = visible.map(it => `
-      <tr>
-        <td style="font-family:var(--font-mono);font-weight:600;color:var(--accent-code);">${it.ln_code}</td>
-        <td><strong style="font-weight:600;">${this.escapeHtml(it.description)}</strong></td>
-        <td><span style="font-family:var(--font-mono);font-weight:700;color:${it.current_stock > 0 ? 'var(--color-in)' : 'var(--color-out)'}">${it.current_stock}</span></td>
-        <td style="color:var(--text-secondary);">${this.escapeHtml(it.category || 'General')}</td>
-        <td style="font-family:var(--font-mono);">${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
-        <td style="font-family:var(--font-mono);">${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
-        <td style="font-size:0.78rem;color:var(--text-muted);">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
-        <td style="text-align:right;">
-          <button type="button" class="btn-delete-stock" onclick="App.openDeleteStockModal('${this.escapeHtml(it.ln_code)}')" title="Delete stock from Google Sheet">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-            <span>Delete</span>
-          </button>
-        </td>
-      </tr>
-    `).join("");
+    const selectedSet = new Set(this.state.selectedLnCodes || []);
+
+    tbody.innerHTML = visible.map(it => {
+      const safeLn = this.escapeHtml(it.ln_code);
+      const isSelected = selectedSet.has(it.ln_code);
+      const selectIndicator = this.state.selectionMode
+        ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}" style="margin-right:0.45rem;vertical-align:middle;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
+        : "";
+
+      return `
+        <tr class="selectable-row ${isSelected ? 'selected-row' : ''}" data-ln="${safeLn}"
+          oncontextmenu="App.handleItemContextMenu(event, '${safeLn}')"
+          onpointerdown="App.handleItemPointerDown(event, '${safeLn}')"
+          onpointerup="App.handleItemPointerUp(event)"
+          onpointercancel="App.handleItemPointerUp(event)"
+          onpointermove="App.handleItemPointerMove(event)"
+          onclick="App.handleItemClick(event, '${safeLn}')">
+          <td style="font-family:var(--font-mono);font-weight:600;color:var(--accent-code);white-space:nowrap;">${selectIndicator}${safeLn}</td>
+          <td><strong style="font-weight:600;">${this.escapeHtml(it.description)}</strong></td>
+          <td><span style="font-family:var(--font-mono);font-weight:700;color:${it.current_stock > 0 ? 'var(--color-in)' : 'var(--color-out)'}">${it.current_stock}</span></td>
+          <td style="color:var(--text-secondary);">${this.escapeHtml(it.category || 'General')}</td>
+          <td style="font-family:var(--font-mono);">${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+          <td style="font-family:var(--font-mono);">${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+          <td style="font-size:0.78rem;color:var(--text-muted);">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
+        </tr>
+      `;
+    }).join("");
 
     if (pagWrap) {
       const remaining = items.length - visible.length;
@@ -905,14 +963,40 @@ const App = {
     this.applyAdminFilter(false);
   },
 
-  applyAdminFilter(resetWindow = true) {
+  setAdminInventoryFilter(filterType, btnEl) {
+    this.state.adminInventoryFilter = filterType;
+    if (btnEl && btnEl.parentElement) {
+      btnEl.parentElement.querySelectorAll(".filter-pill").forEach(p => p.classList.remove("active"));
+      btnEl.classList.add("active");
+    }
+    this.applyAdminFilter(true);
+    this.updateSelectionBarUI();
+  },
+
+  getFilteredAdminList() {
     const query = (document.getElementById("inventorySearchInput")?.value || "").trim().toLowerCase();
-    const filtered = this.state.inventoryData.filter(it =>
-      it.ln_code.toLowerCase().includes(query) ||
-      (it.description && it.description.toLowerCase().includes(query)) ||
-      (it.category && it.category.toLowerCase().includes(query)) ||
-      (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
-    );
+    const filterType = this.state.adminInventoryFilter || "all";
+    let list = this.state.inventoryData || [];
+
+    if (filterType === "in_stock") {
+      list = list.filter(it => Number(it.current_stock || 0) > 0);
+    } else if (filterType === "out_of_stock") {
+      list = list.filter(it => Number(it.current_stock || 0) <= 0);
+    }
+
+    if (query) {
+      list = list.filter(it =>
+        it.ln_code.toLowerCase().includes(query) ||
+        (it.description && it.description.toLowerCase().includes(query)) ||
+        (it.category && it.category.toLowerCase().includes(query)) ||
+        (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
+      );
+    }
+    return list;
+  },
+
+  applyAdminFilter(resetWindow = true) {
+    const filtered = this.getFilteredAdminList();
     this.renderInventoryTable(filtered, resetWindow);
   },
 
@@ -923,76 +1007,199 @@ const App = {
     }, 120);
   },
 
-  async loadAuditLogs(forceRefresh = false) {
-    const tbody = document.getElementById("logsTableBody");
-    tbody.innerHTML = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs...")}</td></tr>`;
-    const actionFilter = document.getElementById("logActionFilter").value;
+  // ----------------- HOLD / RIGHT-CLICK SELECTION MODE -----------------
+  handleItemContextMenu(e, lnCode) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearTimeout(this.state.holdTimer);
+    this.enterOrToggleSelection(lnCode, true);
+  },
 
-    try {
-      const params = new URLSearchParams();
-      if (actionFilter) params.set("action", actionFilter);
-      if (forceRefresh) params.set("refresh", "1");
-      const qs = params.toString() ? `?${params.toString()}` : "";
-      const res = await fetch(`/api/logs${qs}`);
-      const data = await res.json();
-      const logs = data.logs || [];
+  handleItemPointerDown(e, lnCode) {
+    if (e.button && e.button !== 0) return;
+    clearTimeout(this.state.holdTimer);
+    this.state.holdStartX = e.clientX || 0;
+    this.state.holdStartY = e.clientY || 0;
+    this.state.justHeldLn = null;
 
-      if (logs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);">No audit logs recorded yet.</td></tr>`;
-        return;
+    this.state.holdTimer = setTimeout(() => {
+      this.state.justHeldLn = lnCode;
+      if (navigator.vibrate) {
+        try { navigator.vibrate(35); } catch (err) {}
       }
+      this.enterOrToggleSelection(lnCode, true);
+    }, 420);
+  },
 
-      tbody.innerHTML = logs.map(l => {
-        let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
-        if (l.action === "OUT" || l.action === "DELETE") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
-        if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
-
-        return `
-          <tr>
-            <td style="font-size:0.75rem;color:var(--text-muted);">${l.timestamp.slice(0, 19)}</td>
-            <td><strong style="font-weight:600;">${this.escapeHtml(l.employee_username)}</strong></td>
-            <td><span style="${badgeStyle}padding:2px 7px;border-radius:999px;font-weight:600;font-size:0.7rem;">${l.action}</span></td>
-            <td style="font-size:0.78rem;color:var(--text-secondary);">${l.source}</td>
-            <td style="font-family:var(--font-mono);color:var(--accent-code);font-weight:600;">${l.ln_code}</td>
-            <td>${this.escapeHtml(l.description || '')}</td>
-            <td style="font-family:var(--font-mono);"><strong>${l.quantity}</strong></td>
-            <td style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-secondary);">${l.stock_before} → ${l.stock_after}</td>
-          </tr>
-        `;
-      }).join("");
-    } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out)">Failed to load logs</td></tr>`;
+  handleItemPointerMove(e) {
+    if (!this.state.holdTimer) return;
+    const dx = Math.abs((e.clientX || 0) - this.state.holdStartX);
+    const dy = Math.abs((e.clientY || 0) - this.state.holdStartY);
+    if (dx > 12 || dy > 12) {
+      clearTimeout(this.state.holdTimer);
+      this.state.holdTimer = null;
     }
   },
 
-  openDeleteStockModal(lnCode) {
-    const item = (this.state.inventoryData || []).find(it => it.ln_code === lnCode);
-    if (!item) {
-      this.showToast(`Item ${lnCode} not found`, "error");
+  handleItemPointerUp() {
+    if (this.state.holdTimer) {
+      clearTimeout(this.state.holdTimer);
+      this.state.holdTimer = null;
+    }
+  },
+
+  handleItemClick(e, lnCode) {
+    if (this.state.justHeldLn === lnCode) {
+      this.state.justHeldLn = null;
       return;
     }
-    this.state.pendingDeleteItem = item;
-    const codeEl = document.getElementById("deleteModalLnCode");
-    const descEl = document.getElementById("deleteModalDesc");
-    const badgeEl = document.getElementById("deleteModalStockBadge");
-    if (codeEl) codeEl.textContent = item.ln_code;
-    if (descEl) descEl.textContent = item.description || "Godrej Item";
-    if (badgeEl) {
-      const st = Number(item.current_stock || 0);
-      badgeEl.textContent = `${st} in stock`;
-      badgeEl.className = st > 0 ? "stock-badge in-stock" : "stock-badge out-stock";
+    if (!this.state.selectionMode) return;
+    e.preventDefault();
+    this.enterOrToggleSelection(lnCode, false);
+  },
+
+  enterOrToggleSelection(lnCode, forceSelect = false) {
+    const set = new Set(this.state.selectedLnCodes || []);
+    if (!this.state.selectionMode) {
+      this.state.selectionMode = true;
+      set.add(lnCode);
+    } else if (forceSelect) {
+      set.add(lnCode);
+    } else {
+      if (set.has(lnCode)) {
+        set.delete(lnCode);
+      } else {
+        set.add(lnCode);
+      }
     }
+
+    this.state.selectedLnCodes = Array.from(set);
+    if (this.state.selectedLnCodes.length === 0) {
+      this.state.selectionMode = false;
+    }
+    this.applyEmpFilter(false);
+    this.applyAdminFilter(false);
+    this.updateSelectionBarUI();
+  },
+
+  getActiveInventoryList() {
+    const adminScreen = document.getElementById("adminScreen");
+    if (adminScreen && adminScreen.classList.contains("active")) {
+      return this.getFilteredAdminList();
+    }
+    return this.getFilteredEmpList();
+  },
+
+  toggleSelectAllInventory() {
+    const currentList = this.getActiveInventoryList();
+    if (!currentList.length) return;
+    const set = new Set(this.state.selectedLnCodes || []);
+    const allSelected = currentList.every(it => set.has(it.ln_code));
+
+    if (allSelected) {
+      currentList.forEach(it => set.delete(it.ln_code));
+    } else {
+      currentList.forEach(it => set.add(it.ln_code));
+    }
+
+    this.state.selectedLnCodes = Array.from(set);
+    if (this.state.selectedLnCodes.length > 0) {
+      this.state.selectionMode = true;
+    }
+    this.applyEmpFilter(false);
+    this.applyAdminFilter(false);
+    this.updateSelectionBarUI();
+  },
+
+  exitSelectionMode() {
+    this.state.selectionMode = false;
+    this.state.selectedLnCodes = [];
+    this.applyEmpFilter(false);
+    this.applyAdminFilter(false);
+    this.updateSelectionBarUI();
+  },
+
+  updateSelectionBarUI() {
+    const bar = document.getElementById("selectionActionBar");
+    if (!bar) return;
+
+    const count = (this.state.selectedLnCodes || []).length;
+    if (!this.state.selectionMode || count === 0) {
+      bar.classList.add("hidden");
+      return;
+    }
+
+    bar.classList.remove("hidden");
+    const countBadge = document.getElementById("selectionCountBadge");
+    const delBtnTxt = document.getElementById("deleteSelectedBtnText");
+    const selectAllBtn = document.getElementById("selectAllInventoryBtn");
+
+    if (countBadge) countBadge.textContent = `${count} Selected`;
+    if (delBtnTxt) delBtnTxt.textContent = `Delete (${count})`;
+
+    if (selectAllBtn) {
+      const currentList = this.getActiveInventoryList();
+      const set = new Set(this.state.selectedLnCodes || []);
+      const allSelected = currentList.length > 0 && currentList.every(it => set.has(it.ln_code));
+      selectAllBtn.textContent = allSelected ? "Deselect All" : `Select All (${currentList.length})`;
+    }
+  },
+
+  openDeleteSelectedModal() {
+    const selectedSet = new Set(this.state.selectedLnCodes || []);
+    const items = (this.state.inventoryData || []).filter(it => selectedSet.has(it.ln_code));
+    if (items.length === 0) {
+      this.showToast("Select at least one product to delete", "error");
+      return;
+    }
+
+    const titleEl = document.getElementById("deleteModalTitleText");
+    const promptEl = document.getElementById("deleteModalPromptText");
+    const listEl = document.getElementById("deleteModalItemsList");
+
+    if (titleEl) {
+      titleEl.textContent = items.length === 1
+        ? "Confirm Stock Deletion"
+        : `Delete ${items.length} Selected Products`;
+    }
+    if (promptEl) {
+      promptEl.innerHTML = items.length === 1
+        ? `Are you sure you want to permanently delete this product from <strong>Live_Inventory</strong> in Google Sheets?`
+        : `Are you sure you want to permanently delete these <strong>${items.length} products</strong> from <strong>Live_Inventory</strong> in Google Sheets?`;
+    }
+    if (listEl) {
+      listEl.innerHTML = items.map(it => {
+        const st = Number(it.current_stock || 0);
+        const badgeCls = st > 0 ? "stock-badge in-stock" : "stock-badge out-stock";
+        return `
+          <div class="delete-stock-item-box">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+              <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
+              <span class="${badgeCls}">${st} in stock</span>
+            </div>
+            <div style="font-weight:600;font-size:0.86rem;margin-top:0.3rem;color:var(--text-main);">${this.escapeHtml(it.description || 'Godrej Item')}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
     document.getElementById("deleteStockModal").classList.remove("hidden");
   },
 
+  openDeleteStockModal(lnCode) {
+    this.state.selectionMode = true;
+    this.state.selectedLnCodes = [lnCode];
+    this.updateSelectionBarUI();
+    this.openDeleteSelectedModal();
+  },
+
   hideDeleteStockModal() {
-    this.state.pendingDeleteItem = null;
     document.getElementById("deleteStockModal").classList.add("hidden");
   },
 
   async confirmDeleteStock() {
-    const item = this.state.pendingDeleteItem;
-    if (!item) return;
+    const lnCodes = this.state.selectedLnCodes || [];
+    if (lnCodes.length === 0) return;
 
     const btn = document.getElementById("confirmDeleteStockBtn");
     const origHtml = btn ? btn.innerHTML : "";
@@ -1003,20 +1210,23 @@ const App = {
 
     try {
       const username = this.state.currentUser?.username || "admin";
-      const res = await fetch(`/api/inventory/${encodeURIComponent(item.ln_code)}?username=${encodeURIComponent(username)}`, {
-        method: "DELETE"
+      const res = await fetch("/api/inventory/delete-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ln_codes: lnCodes, username })
       });
       const data = await res.json();
       if (res.ok && data.success) {
         this.playSuccessSound();
-        this.showToast(data.message || `Deleted ${item.ln_code} from Google Sheet`, "success");
+        this.showToast(data.message || `Deleted ${lnCodes.length} product(s) from Google Sheet`, "success");
         this.hideDeleteStockModal();
+        this.exitSelectionMode();
         await this.loadInventory(true);
       } else {
-        this.showToast(data.detail || "Failed to delete stock item", "error");
+        this.showToast(data.detail || "Failed to delete selected stock", "error");
       }
     } catch (e) {
-      this.showToast("Network error deleting stock item", "error");
+      this.showToast("Network error deleting selected stock", "error");
     } finally {
       if (btn) {
         btn.disabled = false;

@@ -763,64 +763,104 @@ class GSheetsPrimaryDB:
             except Exception as e:
                 return False, f"Google Sheets write error: {str(e)}"
 
-    def delete_inventory_item(self, ln_code: str, employee_username: str = "admin"):
+    def delete_inventory_batch(self, ln_codes: list, employee_username: str = "admin"):
         """
-        Permanently deletes an item row from Live_Inventory in Google Sheets
-        and records an immutable DELETE audit entry in Audit_Log.
+        Permanently deletes one or more item rows from Live_Inventory in Google Sheets
+        (deleting contiguous row ranges from bottom to top so row indices never shift)
+        and records immutable DELETE audit entries in Audit_Log.
         """
-        ln = (ln_code or "").strip().upper()
-        if not ln:
-            return False, "LN Code is required", None
+        cleaned_lns = []
+        seen = set()
+        for raw_ln in (ln_codes or []):
+            ln = (raw_ln or "").strip().upper()
+            if ln and ln not in seen:
+                seen.add(ln)
+                cleaned_lns.append(ln)
+
+        if not cleaned_lns:
+            return False, "No LN Codes selected for deletion", []
 
         with self._lock:
             try:
                 inv_ws = self._get_ws("Live_Inventory")
                 log_ws = self._get_ws("Audit_Log")
 
-                # Force-refresh to guarantee exact _row_idx before deleting row in Google Sheets
+                # Force-refresh to guarantee exact _row_idx before deleting rows in Google Sheets
                 self.get_inventory_list(force_refresh=True)
-                target = self._cache["inventory"]["by_ln"].get(ln)
-                if not target or not target.get("_row_idx"):
-                    return False, f"Stock item {ln} not found in Google Sheet", None
+                by_ln = self._cache["inventory"]["by_ln"]
 
-                row_idx = target["_row_idx"]
-                stock_before = _to_int(target.get("current_stock", 0), 0)
-                desc = target.get("description") or "Godrej Item"
+                targets = []
+                for ln in cleaned_lns:
+                    t = by_ln.get(ln)
+                    if t and t.get("_row_idx"):
+                        targets.append(t)
+
+                if not targets:
+                    return False, "Selected items were not found in Google Sheet", []
+
+                # Sort ascending to group contiguous row ranges, then delete ranges from bottom to top
+                targets.sort(key=lambda x: x["_row_idx"])
+                ranges = []
+                for t in targets:
+                    r_idx = t["_row_idx"]
+                    if ranges and r_idx == ranges[-1][1] + 1:
+                        ranges[-1] = (ranges[-1][0], r_idx)
+                    else:
+                        ranges.append((r_idx, r_idx))
+
+                for start_row, end_row in reversed(ranges):
+                    self._retry_api(inv_ws.delete_rows, start_row, end_row)
+
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 actor = (employee_username or "admin").strip()
+                base_ts = int(time.time() * 1000)
 
-                # Delete row from Live_Inventory worksheet
-                self._retry_api(inv_ws.delete_rows, row_idx)
+                audit_rows = []
+                deleted_summary = []
+                for idx, t in enumerate(targets):
+                    ln = t["ln_code"]
+                    stock_before = _to_int(t.get("current_stock", 0), 0)
+                    desc = t.get("description") or "Godrej Item"
+                    audit_rows.append([
+                        f"LOG-{base_ts + idx}",
+                        now_str,
+                        actor,
+                        "DELETE",
+                        "APP_DELETE",
+                        ln,
+                        desc,
+                        stock_before,
+                        stock_before,
+                        0,
+                        "",
+                        "Confirmed stock deletion from app"
+                    ])
+                    deleted_summary.append({
+                        "ln_code": ln,
+                        "description": desc,
+                        "deleted_stock": stock_before
+                    })
 
-                # Record deletion in Audit_Log worksheet
-                log_id = f"LOG-{int(time.time() * 1000)}"
-                audit_row = [
-                    log_id,
-                    now_str,
-                    actor,
-                    "DELETE",
-                    "APP_DELETE",
-                    ln,
-                    desc,
-                    stock_before,
-                    stock_before,
-                    0,
-                    "",
-                    "Confirmed stock deletion from app"
-                ]
-                self._retry_api(log_ws.append_row, audit_row)
+                if audit_rows:
+                    self._retry_api(log_ws.append_rows, audit_rows)
 
                 # Refresh inventory cache so row indices of remaining rows stay accurate
                 self.get_inventory_list(force_refresh=True)
                 self._invalidate_cache("audit_logs")
 
-                return True, f"Deleted {ln} ({desc}) from Google Sheet", {
-                    "ln_code": ln,
-                    "description": desc,
-                    "deleted_stock": stock_before
-                }
+                if len(deleted_summary) == 1:
+                    d0 = deleted_summary[0]
+                    msg = f"Deleted {d0['ln_code']} ({d0['description']}) from Google Sheet"
+                else:
+                    msg = f"Deleted {len(deleted_summary)} products from Google Sheet"
+
+                return True, msg, deleted_summary
             except Exception as e:
-                return False, f"Google Sheets delete error: {str(e)}", None
+                return False, f"Google Sheets delete error: {str(e)}", []
+
+    def delete_inventory_item(self, ln_code: str, employee_username: str = "admin"):
+        ok, msg, deleted_list = self.delete_inventory_batch([ln_code], employee_username=employee_username)
+        return ok, msg, (deleted_list[0] if deleted_list else None)
 
     # ----------------- AUDIT LOGS -----------------
     def get_audit_logs(self, limit: int = 200, action: str = None, employee: str = None, force_refresh: bool = False) -> list:

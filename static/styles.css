@@ -1523,7 +1523,7 @@ select:focus {
   font-size: 0.78rem;
 }
 
-/* Delete Stock & Change Password Modals / Buttons */
+/* Hold / Right-Click Multi-Select & Delete Stock UI */
 .btn-danger {
   background: var(--color-out);
   border: 1px solid var(--color-out);
@@ -1534,32 +1534,109 @@ select:focus {
   filter: brightness(1.08);
 }
 
-.btn-delete-stock {
+.selection-hint-text {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  align-self: center;
+}
+
+.emp-inventory-card {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  cursor: pointer;
+}
+
+.emp-inventory-card.selected-item {
+  border-color: var(--color-out) !important;
+  background: var(--color-out-bg) !important;
+  box-shadow: 0 0 0 1px var(--color-out);
+}
+
+.data-table tbody tr.selectable-row {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.data-table tbody tr.selected-row td {
+  background: var(--color-out-bg) !important;
+}
+
+.select-check-circle {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
   display: inline-flex;
   align-items: center;
-  gap: 0.28rem;
-  padding: 3px 8px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  font-family: inherit;
-  border-radius: var(--radius-sm);
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  color: transparent;
+  transition: all 0.12s ease;
+}
+
+.select-check-circle.checked {
+  background: var(--color-out);
+  border-color: var(--color-out);
+  color: #ffffff;
+}
+
+.selection-action-bar {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 2rem);
+  max-width: 640px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 0.65rem 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 120;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.selection-bar-left,
+.selection-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.selection-count-pill {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
   background: var(--color-out-bg);
   border: 1px solid var(--color-out-border);
   color: var(--color-out);
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-
-.btn-delete-stock:hover {
-  background: var(--color-out);
-  color: #ffffff;
+  white-space: nowrap;
 }
 
 .delete-stock-item-box {
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  padding: 0.75rem 0.9rem;
+  padding: 0.7rem 0.85rem;
+}
+
+.delete-modal-items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-height: 240px;
+  overflow-y: auto;
 }
 
 .user-actions-group {
