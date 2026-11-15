@@ -52,6 +52,10 @@ class CreateUserRequest(BaseModel):
     role: str = "employee"
 
 
+class ChangePasswordRequest(BaseModel):
+    new_password: str
+
+
 class BatchItem(BaseModel):
     ln_code: str
     description: Optional[str] = ""
@@ -125,6 +129,14 @@ def add_user(req: CreateUserRequest):
 @app.delete("/api/users/{user_id}")
 def remove_user(user_id: int):
     ok, msg = gsheets_db.delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"success": True, "message": msg}
+
+
+@app.put("/api/users/{user_id}/password")
+def change_user_password(user_id: int, req: ChangePasswordRequest):
+    ok, msg = gsheets_db.update_user_password(user_id, req.new_password)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return {"success": True, "message": msg}
@@ -204,6 +216,19 @@ def get_inventory(search: str = "", refresh: int = Query(0), role: str = Query("
         "synced_at": gsheets_db.get_last_synced_at(),
         "sheet_id": gsheets_db.spreadsheet_id,
         "storage_mode": "google_sheets_primary"
+    }
+
+
+@app.delete("/api/inventory/{ln_code}")
+def delete_inventory_item(ln_code: str, username: str = Query("admin")):
+    ok, msg, deleted = gsheets_db.delete_inventory_item(ln_code, employee_username=username)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {
+        "success": True,
+        "message": msg,
+        "deleted": deleted,
+        "synced_at": gsheets_db.get_last_synced_at()
     }
 
 

@@ -490,6 +490,23 @@ class GSheetsPrimaryDB:
             self._invalidate_cache("users")
             return True, "User deleted permanently from Google Sheets"
 
+    def update_user_password(self, user_id: int, new_password: str):
+        with self._lock:
+            pwd = (new_password or "").strip()
+            if len(pwd) < 4:
+                return False, "Password must be at least 4 characters"
+
+            users = self.get_all_users(force_refresh=True)
+            target = next((u for u in users if u["id"] == int(user_id)), None)
+            if not target:
+                return False, "User account not found"
+
+            ws = self._get_ws("Users")
+            new_hash = hash_password(pwd)
+            self._retry_api(ws.update, [[new_hash]], f"C{target['_row_idx']}")
+            self._invalidate_cache("users")
+            return True, f"Password updated for @{target['username']} in Google Sheets"
+
     # ----------------- INVENTORY -----------------
     def get_inventory_list(self, search: str = "", force_refresh: bool = False, include_prices: bool = True) -> list:
         with self._lock:
@@ -745,6 +762,65 @@ class GSheetsPrimaryDB:
                 return True, results
             except Exception as e:
                 return False, f"Google Sheets write error: {str(e)}"
+
+    def delete_inventory_item(self, ln_code: str, employee_username: str = "admin"):
+        """
+        Permanently deletes an item row from Live_Inventory in Google Sheets
+        and records an immutable DELETE audit entry in Audit_Log.
+        """
+        ln = (ln_code or "").strip().upper()
+        if not ln:
+            return False, "LN Code is required", None
+
+        with self._lock:
+            try:
+                inv_ws = self._get_ws("Live_Inventory")
+                log_ws = self._get_ws("Audit_Log")
+
+                # Force-refresh to guarantee exact _row_idx before deleting row in Google Sheets
+                self.get_inventory_list(force_refresh=True)
+                target = self._cache["inventory"]["by_ln"].get(ln)
+                if not target or not target.get("_row_idx"):
+                    return False, f"Stock item {ln} not found in Google Sheet", None
+
+                row_idx = target["_row_idx"]
+                stock_before = _to_int(target.get("current_stock", 0), 0)
+                desc = target.get("description") or "Godrej Item"
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                actor = (employee_username or "admin").strip()
+
+                # Delete row from Live_Inventory worksheet
+                self._retry_api(inv_ws.delete_rows, row_idx)
+
+                # Record deletion in Audit_Log worksheet
+                log_id = f"LOG-{int(time.time() * 1000)}"
+                audit_row = [
+                    log_id,
+                    now_str,
+                    actor,
+                    "DELETE",
+                    "APP_DELETE",
+                    ln,
+                    desc,
+                    stock_before,
+                    stock_before,
+                    0,
+                    "",
+                    "Confirmed stock deletion from app"
+                ]
+                self._retry_api(log_ws.append_row, audit_row)
+
+                # Refresh inventory cache so row indices of remaining rows stay accurate
+                self.get_inventory_list(force_refresh=True)
+                self._invalidate_cache("audit_logs")
+
+                return True, f"Deleted {ln} ({desc}) from Google Sheet", {
+                    "ln_code": ln,
+                    "description": desc,
+                    "deleted_stock": stock_before
+                }
+            except Exception as e:
+                return False, f"Google Sheets delete error: {str(e)}", None
 
     # ----------------- AUDIT LOGS -----------------
     def get_audit_logs(self, limit: int = 200, action: str = None, employee: str = None, force_refresh: bool = False) -> list:

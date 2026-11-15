@@ -744,9 +744,15 @@ const App = {
           </div>
           <div class="emp-inv-footer">
             ${priceHtml}
-            <div class="updated-box">
-              <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
-              <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
+            <div style="display:flex;align-items:center;gap:0.6rem;margin-left:auto;">
+              <div class="updated-box">
+                <span class="updated-time">${it.last_updated ? it.last_updated.slice(0, 16) : 'Catalog'}</span>
+                <span class="updated-user">${this.escapeHtml(it.last_updated_by || 'system')}</span>
+              </div>
+              <button type="button" class="btn-delete-stock" onclick="App.openDeleteStockModal('${this.escapeHtml(it.ln_code)}')" title="Delete stock from Google Sheet">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                <span>Delete</span>
+              </button>
             </div>
           </div>
         </div>
@@ -854,7 +860,7 @@ const App = {
     const tbody = document.getElementById("inventoryTableBody");
     const pagWrap = document.getElementById("adminInventoryPagination");
     if (items.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
       if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
@@ -870,6 +876,12 @@ const App = {
         <td style="font-family:var(--font-mono);">${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
         <td style="font-family:var(--font-mono);">${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
         <td style="font-size:0.78rem;color:var(--text-muted);">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
+        <td style="text-align:right;">
+          <button type="button" class="btn-delete-stock" onclick="App.openDeleteStockModal('${this.escapeHtml(it.ln_code)}')" title="Delete stock from Google Sheet">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            <span>Delete</span>
+          </button>
+        </td>
       </tr>
     `).join("");
 
@@ -932,7 +944,7 @@ const App = {
 
       tbody.innerHTML = logs.map(l => {
         let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
-        if (l.action === "OUT") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
+        if (l.action === "OUT" || l.action === "DELETE") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
         if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
 
         return `
@@ -953,6 +965,66 @@ const App = {
     }
   },
 
+  openDeleteStockModal(lnCode) {
+    const item = (this.state.inventoryData || []).find(it => it.ln_code === lnCode);
+    if (!item) {
+      this.showToast(`Item ${lnCode} not found`, "error");
+      return;
+    }
+    this.state.pendingDeleteItem = item;
+    const codeEl = document.getElementById("deleteModalLnCode");
+    const descEl = document.getElementById("deleteModalDesc");
+    const badgeEl = document.getElementById("deleteModalStockBadge");
+    if (codeEl) codeEl.textContent = item.ln_code;
+    if (descEl) descEl.textContent = item.description || "Godrej Item";
+    if (badgeEl) {
+      const st = Number(item.current_stock || 0);
+      badgeEl.textContent = `${st} in stock`;
+      badgeEl.className = st > 0 ? "stock-badge in-stock" : "stock-badge out-stock";
+    }
+    document.getElementById("deleteStockModal").classList.remove("hidden");
+  },
+
+  hideDeleteStockModal() {
+    this.state.pendingDeleteItem = null;
+    document.getElementById("deleteStockModal").classList.add("hidden");
+  },
+
+  async confirmDeleteStock() {
+    const item = this.state.pendingDeleteItem;
+    if (!item) return;
+
+    const btn = document.getElementById("confirmDeleteStockBtn");
+    const origHtml = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="border-top-color:#fff;"></span><span>Deleting...</span>`;
+    }
+
+    try {
+      const username = this.state.currentUser?.username || "admin";
+      const res = await fetch(`/api/inventory/${encodeURIComponent(item.ln_code)}?username=${encodeURIComponent(username)}`, {
+        method: "DELETE"
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        this.playSuccessSound();
+        this.showToast(data.message || `Deleted ${item.ln_code} from Google Sheet`, "success");
+        this.hideDeleteStockModal();
+        await this.loadInventory(true);
+      } else {
+        this.showToast(data.detail || "Failed to delete stock item", "error");
+      }
+    } catch (e) {
+      this.showToast("Network error deleting stock item", "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
+    }
+  },
+
   async loadUsers(forceRefresh = false) {
     const container = document.getElementById("usersListContainer");
     try {
@@ -964,16 +1036,80 @@ const App = {
       container.innerHTML = users.map(u => `
         <div class="user-item-card">
           <div>
-            <div class="user-item-name">${this.escapeHtml(u.full_name)} <span style="font-weight:400;color:var(--text-muted);">(@${u.username})</span></div>
-            <div class="user-item-role">${u.role.toUpperCase()} • Joined ${u.created_at.slice(0,10)}</div>
+            <div class="user-item-name">${this.escapeHtml(u.full_name)} <span style="font-weight:400;color:var(--text-muted);">(@${this.escapeHtml(u.username)})</span></div>
+            <div class="user-item-role">${u.role.toUpperCase()} • Joined ${u.created_at.slice(0,10)}${u.username === "admin" ? " • Primary Admin" : ""}</div>
           </div>
-          ${u.username !== "admin" ? `
-            <button class="btn btn-secondary btn-sm" onclick="App.deleteUser(${u.id})" style="color:var(--color-out);">Delete</button>
-          ` : `<span style="font-size:0.74rem;color:var(--text-muted);font-weight:600;">Primary Admin</span>`}
+          <div class="user-actions-group">
+            <button type="button" class="btn btn-secondary btn-sm" onclick="App.openChangePasswordModal(${u.id}, '${this.escapeHtml(u.username)}', '${this.escapeHtml(u.full_name).replace(/'/g, "\\'")}')">
+              Change Password
+            </button>
+            ${u.username !== "admin" ? `
+              <button type="button" class="btn btn-secondary btn-sm" onclick="App.deleteUser(${u.id})" style="color:var(--color-out);">Delete</button>
+            ` : ""}
+          </div>
         </div>
       `).join("");
     } catch (e) {
       container.innerHTML = `<p style="color:var(--color-out)">Could not load users list</p>`;
+    }
+  },
+
+  openChangePasswordModal(userId, username, fullName) {
+    document.getElementById("changePwdUserId").value = String(userId);
+    const lbl = document.getElementById("changePwdUserLabel");
+    if (lbl) lbl.textContent = `${fullName} (@${username})`;
+    document.getElementById("changePwdNewInput").value = "";
+    document.getElementById("changePwdConfirmInput").value = "";
+    document.getElementById("changePasswordModal").classList.remove("hidden");
+  },
+
+  hideChangePasswordModal() {
+    document.getElementById("changePasswordModal").classList.add("hidden");
+  },
+
+  async submitChangePassword(e) {
+    e.preventDefault();
+    const userId = document.getElementById("changePwdUserId").value;
+    const newPassword = document.getElementById("changePwdNewInput").value.trim();
+    const confirmPassword = document.getElementById("changePwdConfirmInput").value.trim();
+
+    if (newPassword.length < 4) {
+      this.showToast("Password must be at least 4 characters", "error");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      this.showToast("Passwords do not match", "error");
+      return;
+    }
+
+    const btn = document.getElementById("changePwdSubmitBtn");
+    const origHtml = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span class="spinner" style="border-top-color:#fff;"></span><span>Updating...</span>`;
+    }
+
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(userId)}/password`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_password: newPassword })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        this.playSuccessSound();
+        this.showToast(data.message || "Password updated in Google Sheets", "success");
+        this.hideChangePasswordModal();
+      } else {
+        this.showToast(data.detail || "Failed to update password", "error");
+      }
+    } catch (err) {
+      this.showToast("Network error updating password", "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
     }
   },
 
