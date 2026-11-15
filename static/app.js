@@ -20,6 +20,7 @@ const App = {
     holdStartX: 0,
     holdStartY: 0,
     justHeldLn: null,
+    auditLogs: [],
     theme: "dark",
     audioCtx: null
   },
@@ -144,11 +145,17 @@ const App = {
       this.loadSettings();
     } else if (screenId === "employeeInventoryScreen") {
       this.loadInventory(true);
+    } else if (screenId === "employeeLogsScreen") {
+      this.loadAuditLogs(true);
     }
   },
 
   openEmployeeInventory() {
     this.showScreen("employeeInventoryScreen");
+  },
+
+  openEmployeeLogs() {
+    this.showScreen("employeeLogsScreen");
   },
 
   updateSyncBadge(syncInfo) {
@@ -1233,6 +1240,102 @@ const App = {
         btn.innerHTML = origHtml;
       }
     }
+  },
+
+  async loadAuditLogs(forceRefresh = false) {
+    const adminTbody = document.getElementById("logsTableBody");
+    const empTbody = document.getElementById("empLogsTableBody");
+
+    const loadingHtml = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs from Google Sheets...")}</td></tr>`;
+    if (adminTbody) adminTbody.innerHTML = loadingHtml;
+    if (empTbody) empTbody.innerHTML = loadingHtml;
+
+    // Read action filter from whichever screen/tab has user selection
+    const adminFilterEl = document.getElementById("logActionFilter");
+    const empFilterEl = document.getElementById("empLogActionFilter");
+    let actionFilter = "";
+    if (adminFilterEl && adminFilterEl.value) actionFilter = adminFilterEl.value;
+    else if (empFilterEl && empFilterEl.value) actionFilter = empFilterEl.value;
+
+    try {
+      const params = new URLSearchParams();
+      if (actionFilter) params.set("action", actionFilter);
+      if (forceRefresh) params.set("refresh", "1");
+      const qs = params.toString() ? `?${params.toString()}` : "";
+      const res = await fetch(`/api/logs${qs}`);
+      const data = await res.json();
+      this.state.auditLogs = data.logs || [];
+
+      this.filterAuditLogs();
+    } catch (e) {
+      const errHtml = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Failed to load logs from Google Sheets</td></tr>`;
+      if (adminTbody) adminTbody.innerHTML = errHtml;
+      if (empTbody) empTbody.innerHTML = errHtml;
+    }
+  },
+
+  filterAuditLogs() {
+    const adminSearch = (document.getElementById("logSearchInput")?.value || "").trim().toLowerCase();
+    const empSearch = (document.getElementById("empLogSearchInput")?.value || "").trim().toLowerCase();
+    const query = adminSearch || empSearch;
+
+    const all = this.state.auditLogs || [];
+    if (!query) {
+      this.renderAuditLogsTable(all);
+      return;
+    }
+
+    const filtered = all.filter(l => {
+      const ln = (l.ln_code || "").toLowerCase();
+      const desc = (l.description || "").toLowerCase();
+      const emp = (l.employee_username || "").toLowerCase();
+      const inv = (l.invoice_no || "").toLowerCase();
+      const act = (l.action || "").toLowerCase();
+      return ln.includes(query) || desc.includes(query) || emp.includes(query) || inv.includes(query) || act.includes(query);
+    });
+
+    this.renderAuditLogsTable(filtered);
+  },
+
+  renderAuditLogsTable(logs) {
+    const adminTbody = document.getElementById("logsTableBody");
+    const empTbody = document.getElementById("empLogsTableBody");
+
+    if (logs.length === 0) {
+      const emptyHtml = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:2rem;">No audit logs match current filters.</td></tr>`;
+      if (adminTbody) adminTbody.innerHTML = emptyHtml;
+      if (empTbody) empTbody.innerHTML = emptyHtml;
+      return;
+    }
+
+    const rowsHtml = logs.map(l => {
+      let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
+      if (l.action === "OUT" || l.action === "DELETE") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
+      if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
+
+      const refNote = l.invoice_no ? `Ref: ${l.invoice_no}` : (l.notes || "");
+      const timeStr = l.timestamp || "";
+      const displayTime = timeStr ? timeStr.slice(0, 19) : "—";
+
+      return `
+        <tr>
+          <td style="font-size:0.75rem;color:var(--text-muted);white-space:nowrap;font-family:var(--font-mono);">${this.escapeHtml(displayTime)}</td>
+          <td style="font-weight:600;">${this.escapeHtml(l.employee_username)}</td>
+          <td><span class="stock-badge" style="${badgeStyle}">${this.escapeHtml(l.action)}</span></td>
+          <td style="font-size:0.75rem;color:var(--text-muted);">${this.escapeHtml(l.source || '')}</td>
+          <td style="font-family:var(--font-mono);font-size:0.8rem;">${this.escapeHtml(l.ln_code)}</td>
+          <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.escapeHtml(l.description || '')}${refNote ? ' • ' + this.escapeHtml(refNote) : ''}">
+            <span style="font-weight:500;">${this.escapeHtml(l.description || 'Godrej Item')}</span>
+            ${refNote ? `<span style="font-size:0.72rem;color:var(--text-muted);display:block;">${this.escapeHtml(refNote)}</span>` : ''}
+          </td>
+          <td style="font-weight:700;">${l.quantity}</td>
+          <td style="font-size:0.78rem;font-family:var(--font-mono);">${l.stock_before} &rarr; ${l.stock_after}</td>
+        </tr>
+      `;
+    }).join("");
+
+    if (adminTbody) adminTbody.innerHTML = rowsHtml;
+    if (empTbody) empTbody.innerHTML = rowsHtml;
   },
 
   async loadUsers(forceRefresh = false) {

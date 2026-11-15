@@ -6,8 +6,17 @@ import sqlite3
 import threading
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+
+# India Standard Time (IST, UTC+05:30) for Godrej India operations
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now() -> datetime:
+    return datetime.now(IST)
+
+def get_ist_now_str(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    return datetime.now(IST).strftime(fmt)
 
 import gspread
 from gspread.utils import rowcol_to_a1
@@ -293,7 +302,7 @@ class GSheetsPrimaryDB:
 
     def _seed_initial_users(self, users_ws):
         seed_rows = []
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = get_ist_now_str()
         local_sqlite = os.path.join(ROOT_DIR, "inventory.db")
         seen_usernames = set()
 
@@ -389,7 +398,7 @@ class GSheetsPrimaryDB:
         with self._lock:
             ws = self._get_ws("Settings")
             rows = self._retry_api(ws.get_all_values)
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = get_ist_now_str()
             key_clean = key.strip()
 
             found_row = None
@@ -468,7 +477,7 @@ class GSheetsPrimaryDB:
                 return False, "Username already exists"
 
             next_id = max((u["id"] for u in users), default=0) + 1
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = get_ist_now_str()
             ws = self._get_ws("Users")
             self._retry_api(ws.append_row, [
                 next_id, uname, hash_password(password), full_name.strip(), role, 1, now_str
@@ -571,7 +580,7 @@ class GSheetsPrimaryDB:
                     "data": items,
                     "by_ln": by_ln,
                     "ts": now,
-                    "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "synced_at": get_ist_now_str()
                 }
 
             result = list(self._cache["inventory"]["data"])
@@ -624,7 +633,7 @@ class GSheetsPrimaryDB:
                     default=1
                 ) + 1
 
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_str = get_ist_now_str()
                 batch_updates = []  # For existing rows updated in-place
                 new_rows = []       # For newly seen LN codes
                 audit_rows = []
@@ -811,7 +820,7 @@ class GSheetsPrimaryDB:
                 for start_row, end_row in reversed(ranges):
                     self._retry_api(inv_ws.delete_rows, start_row, end_row)
 
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_str = get_ist_now_str()
                 actor = (employee_username or "admin").strip()
                 base_ts = int(time.time() * 1000)
 
@@ -908,7 +917,7 @@ class GSheetsPrimaryDB:
         Serverless-friendly automatic daily backup:
         On the first login or write of a new day, snapshots Live_Inventory to Backup_Latest & Backup_History.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = get_ist_now_str("%Y-%m-%d")
         last_auto = self.get_setting("last_auto_backup_date", "")
         if last_auto == today:
             return False, "Already backed up today"
@@ -930,7 +939,7 @@ class GSheetsPrimaryDB:
         """
         with self._lock:
             items = self.get_inventory_list(force_refresh=True)
-            now_dt = datetime.now()
+            now_dt = get_ist_now()
             now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
             date_str = now_dt.strftime("%Y-%m-%d")
             backup_id = f"{trigger}-{now_dt.strftime('%Y%m%d-%H%M%S')}"
@@ -1040,7 +1049,7 @@ class GSheetsPrimaryDB:
                 self._retry_api(inv_ws.clear)
                 self._retry_api(inv_ws.update, rows, "A1")
 
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_str = get_ist_now_str()
                 self._retry_api(log_ws.append_row, [
                     f"RESTORE-{int(time.time())}",
                     now_str,
