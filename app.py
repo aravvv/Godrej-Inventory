@@ -251,7 +251,9 @@ def delete_inventory_item(ln_code: str, username: str = Query("admin")):
 
 
 @app.get("/api/logs")
-def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[str] = None, refresh: int = Query(0)):
+def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[str] = None, refresh: int = Query(0), role: str = Query("")):
+    if (role or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Audit logs are strictly restricted to admin users.")
     return {
         "logs": gsheets_db.get_audit_logs(
             limit=limit, action=action, employee=employee, force_refresh=bool(refresh)

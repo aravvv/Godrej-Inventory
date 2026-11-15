@@ -155,20 +155,6 @@
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
             </div>
           </button>
-
-          <!-- MODE 5: ACTIVITY & AUDIT LOGS -->
-          <button class="mode-card mode-logs" onclick="App.openEmployeeLogs()">
-            <div class="mode-icon-box logs-box">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-            </div>
-            <div class="mode-text">
-              <span class="mode-title">Activity &amp; Audit Logs</span>
-              <span class="mode-desc">Live immutable ledger of transactions synced with Google Sheets</span>
-            </div>
-            <div class="mode-arrow">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </div>
-          </button>
         </div>
 
         <!-- Quick Admin Switcher if user is admin -->
@@ -245,64 +231,6 @@
             <div class="ai-inline-loader"><span class="ai-pulse-dots"><span></span><span></span><span></span></span><span>Syncing inventory...</span></div>
           </div>
           <div id="empInventoryPagination" class="pagination-wrap"></div>
-        </div>
-      </section>
-
-      <!-- SCREEN: EMPLOYEE ACTIVITY & AUDIT LOGS -->
-      <section id="employeeLogsScreen" class="screen">
-        <div class="scan-header">
-          <button class="btn-back" onclick="App.showScreen('employeeScreen')">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-            <span>Back</span>
-          </button>
-          <div class="mode-pill logs-pill">Audit Trail (IST)</div>
-        </div>
-
-        <div class="glass-panel" style="padding: 1.15rem; margin-bottom: 1rem;">
-          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem; margin-bottom:0.9rem;">
-            <div>
-              <h2 style="font-size:1.15rem; font-weight:700; letter-spacing:-0.02em;">Activity &amp; Audit Logs</h2>
-              <p style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">Google Sheets Immutable Ledger • Indian Standard Time (IST)</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" onclick="App.loadAuditLogs(true)" title="Fetch newest logs from Google Sheet">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-              <span>Refresh Logs</span>
-            </button>
-          </div>
-
-          <div class="inventory-toolbar" style="margin-top:0.5rem; display:flex; gap:0.6rem; flex-wrap:wrap;">
-            <select id="empLogActionFilter" onchange="App.loadAuditLogs()" style="max-width:220px; font-size:0.85rem;">
-              <option value="">All Actions (IN, OUT, TRANSIT, DELETE)</option>
-              <option value="IN">IN</option>
-              <option value="OUT">OUT</option>
-              <option value="CAME_IN_AND_WENT_OUT">CAME IN &amp; WENT OUT</option>
-              <option value="DELETE">DELETE</option>
-            </select>
-            <div class="search-input-wrapper" style="flex:1; min-width:240px;">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input type="text" id="empLogSearchInput" class="glass-input search-input" placeholder="Search by LN code, description, employee, or ref..." oninput="App.filterAuditLogs()">
-            </div>
-          </div>
-        </div>
-
-        <div class="table-responsive" style="margin-top: 0.5rem;">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Time (IST)</th>
-                <th>Employee</th>
-                <th>Action</th>
-                <th>Source</th>
-                <th>LN Code</th>
-                <th>Product Description</th>
-                <th>Qty</th>
-                <th>Before / After</th>
-              </tr>
-            </thead>
-            <tbody id="empLogsTableBody">
-              <tr><td colspan="8" class="text-center"><span class="ai-inline-loader"><span class="ai-pulse-dots"><span></span><span></span><span></span></span><span>Loading logs from Google Sheets...</span></span></td></tr>
-            </tbody>
-          </table>
         </div>
       </section>
 

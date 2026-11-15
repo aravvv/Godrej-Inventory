@@ -145,17 +145,11 @@ const App = {
       this.loadSettings();
     } else if (screenId === "employeeInventoryScreen") {
       this.loadInventory(true);
-    } else if (screenId === "employeeLogsScreen") {
-      this.loadAuditLogs(true);
     }
   },
 
   openEmployeeInventory() {
     this.showScreen("employeeInventoryScreen");
-  },
-
-  openEmployeeLogs() {
-    this.showScreen("employeeLogsScreen");
   },
 
   updateSyncBadge(syncInfo) {
@@ -1243,44 +1237,40 @@ const App = {
   },
 
   async loadAuditLogs(forceRefresh = false) {
+    if (this.state.currentUser?.role !== "admin") return;
     const adminTbody = document.getElementById("logsTableBody");
-    const empTbody = document.getElementById("empLogsTableBody");
+    if (!adminTbody) return;
 
-    const loadingHtml = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs from Google Sheets...")}</td></tr>`;
-    if (adminTbody) adminTbody.innerHTML = loadingHtml;
-    if (empTbody) empTbody.innerHTML = loadingHtml;
+    adminTbody.innerHTML = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs from Google Sheets...")}</td></tr>`;
 
-    // Read action filter from whichever screen/tab has user selection
     const adminFilterEl = document.getElementById("logActionFilter");
-    const empFilterEl = document.getElementById("empLogActionFilter");
-    let actionFilter = "";
-    if (adminFilterEl && adminFilterEl.value) actionFilter = adminFilterEl.value;
-    else if (empFilterEl && empFilterEl.value) actionFilter = empFilterEl.value;
+    const actionFilter = (adminFilterEl && adminFilterEl.value) || "";
 
     try {
       const params = new URLSearchParams();
+      params.set("role", "admin");
       if (actionFilter) params.set("action", actionFilter);
       if (forceRefresh) params.set("refresh", "1");
       const qs = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(`/api/logs${qs}`);
+      if (res.status === 403) {
+        adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Audit logs are strictly restricted to admin users.</td></tr>`;
+        return;
+      }
       const data = await res.json();
       this.state.auditLogs = data.logs || [];
 
       this.filterAuditLogs();
     } catch (e) {
-      const errHtml = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Failed to load logs from Google Sheets</td></tr>`;
-      if (adminTbody) adminTbody.innerHTML = errHtml;
-      if (empTbody) empTbody.innerHTML = errHtml;
+      adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Failed to load logs from Google Sheets</td></tr>`;
     }
   },
 
   filterAuditLogs() {
+    if (this.state.currentUser?.role !== "admin") return;
     const adminSearch = (document.getElementById("logSearchInput")?.value || "").trim().toLowerCase();
-    const empSearch = (document.getElementById("empLogSearchInput")?.value || "").trim().toLowerCase();
-    const query = adminSearch || empSearch;
-
     const all = this.state.auditLogs || [];
-    if (!query) {
+    if (!adminSearch) {
       this.renderAuditLogsTable(all);
       return;
     }
@@ -1291,7 +1281,7 @@ const App = {
       const emp = (l.employee_username || "").toLowerCase();
       const inv = (l.invoice_no || "").toLowerCase();
       const act = (l.action || "").toLowerCase();
-      return ln.includes(query) || desc.includes(query) || emp.includes(query) || inv.includes(query) || act.includes(query);
+      return ln.includes(adminSearch) || desc.includes(adminSearch) || emp.includes(adminSearch) || inv.includes(adminSearch) || act.includes(adminSearch);
     });
 
     this.renderAuditLogsTable(filtered);
@@ -1299,16 +1289,14 @@ const App = {
 
   renderAuditLogsTable(logs) {
     const adminTbody = document.getElementById("logsTableBody");
-    const empTbody = document.getElementById("empLogsTableBody");
+    if (!adminTbody) return;
 
     if (logs.length === 0) {
-      const emptyHtml = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:2rem;">No audit logs match current filters.</td></tr>`;
-      if (adminTbody) adminTbody.innerHTML = emptyHtml;
-      if (empTbody) empTbody.innerHTML = emptyHtml;
+      adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:2rem;">No audit logs match current filters.</td></tr>`;
       return;
     }
 
-    const rowsHtml = logs.map(l => {
+    adminTbody.innerHTML = logs.map(l => {
       let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
       if (l.action === "OUT" || l.action === "DELETE") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
       if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
@@ -1333,9 +1321,6 @@ const App = {
         </tr>
       `;
     }).join("");
-
-    if (adminTbody) adminTbody.innerHTML = rowsHtml;
-    if (empTbody) empTbody.innerHTML = rowsHtml;
   },
 
   async loadUsers(forceRefresh = false) {
