@@ -1,4 +1,4 @@
-// Godrej Inventory Automation Client Application
+// Godrej Inventory Automation Client Application (Modern AI Workspace UI)
 const App = {
   state: {
     currentUser: null,
@@ -12,12 +12,45 @@ const App = {
     adminVisibleCount: 100,
     searchDebounceTimer: null,
     adminSearchDebounceTimer: null,
+    theme: "dark",
     audioCtx: null
   },
 
   init() {
+    this.initTheme();
     this.bindEvents();
     this.checkSession();
+  },
+
+  initTheme() {
+    const saved = localStorage.getItem("godrej_theme") || "dark";
+    this.applyTheme(saved);
+  },
+
+  toggleTheme() {
+    const next = this.state.theme === "dark" ? "light" : "dark";
+    localStorage.setItem("godrej_theme", next);
+    this.applyTheme(next);
+  },
+
+  applyTheme(theme) {
+    this.state.theme = theme;
+    document.documentElement.setAttribute("data-theme", theme);
+    const icon = document.getElementById("themeIcon");
+    const label = document.getElementById("themeLabel");
+    if (icon && label) {
+      if (theme === "dark") {
+        icon.textContent = "☀️";
+        label.textContent = "Light";
+      } else {
+        icon.textContent = "🌙";
+        label.textContent = "Dark";
+      }
+    }
+  },
+
+  inlineLoaderHtml(msg = "Syncing...") {
+    return `<span class="ai-inline-loader"><span class="ai-pulse-dots"><span></span><span></span><span></span></span><span>${msg}</span></span>`;
   },
 
   // Audio & Haptic Feedback for Warehouse
@@ -32,7 +65,7 @@ const App = {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
-      osc.frequency.setValueAtTime(880, ctx.currentTime); // High pleasant chime (A5)
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
       osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.12);
       gain.gain.setValueAtTime(0.2, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
@@ -40,11 +73,8 @@ const App = {
       gain.connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + 0.15);
-    } catch (e) {
-      // Audio autoplay restrictions fallback
-    }
+    } catch (e) {}
 
-    // Phone vibration
     if (navigator.vibrate) {
       navigator.vibrate([60, 40, 60]);
     }
@@ -78,7 +108,6 @@ const App = {
         this.state.currentUser = JSON.parse(saved);
         this.updateUserHeader();
         this.showScreen("employeeScreen");
-        // Auto-sync directly from Google Sheets on every app open / page refresh
         this.refreshFromSheets(null, true);
       } catch (e) {
         localStorage.removeItem("godrej_user");
@@ -116,7 +145,7 @@ const App = {
     if (homeEl && syncInfo) {
       const count = syncInfo.inventory_count !== undefined ? `${syncInfo.inventory_count} items` : "Ready";
       const timeStr = syncInfo.synced_at ? syncInfo.synced_at.slice(11, 19) : "Now";
-      homeEl.textContent = `Google Sheets Primary • ${count} synced (${timeStr})`;
+      homeEl.textContent = `Google Sheets • ${count} (${timeStr})`;
     }
   },
 
@@ -148,7 +177,7 @@ const App = {
     const submitBtn = document.getElementById("loginSubmitBtn");
 
     submitBtn.disabled = true;
-    submitBtn.innerHTML = `<span>Signing In & Syncing Sheets...</span>`;
+    submitBtn.innerHTML = `<span class="spinner"></span><span>Signing in...</span>`;
 
     try {
       const res = await fetch("/api/login", {
@@ -165,7 +194,7 @@ const App = {
           this.updateSyncBadge(data.sync_info);
         }
         const syncedCount = data.sync_info?.inventory_count ?? 0;
-        this.showToast(`Welcome, ${data.user.full_name}! Synced ${syncedCount} items from Google Sheet.`, "success");
+        this.showToast(`Welcome, ${data.user.full_name} • ${syncedCount} items synced`, "success");
         this.showScreen("employeeScreen");
       } else {
         this.showToast(data.detail || "Invalid login credentials", "error");
@@ -174,7 +203,7 @@ const App = {
       this.showToast("Connection error. Check network.", "error");
     } finally {
       submitBtn.disabled = false;
-      submitBtn.innerHTML = `<span>Sign In</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`;
+      submitBtn.innerHTML = `<span>Continue</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>`;
     }
   },
 
@@ -183,7 +212,7 @@ const App = {
     localStorage.removeItem("godrej_user");
     this.updateUserHeader();
     this.showScreen("loginScreen");
-    this.showToast("Logged out successfully");
+    this.showToast("Signed out");
   },
 
   // ----------------- MODE & SCANNING -----------------
@@ -199,22 +228,21 @@ const App = {
     badge.className = "mode-pill";
     if (mode === "IN") {
       badge.classList.add("in-pill");
-      badge.textContent = "IN (STOCK ARRIVAL)";
+      badge.textContent = "IN • Stock Arrival";
       methodSelector.style.display = "flex";
-      processBtnText.textContent = "Process Inward Stock";
+      processBtnText.textContent = "Commit Inward Stock";
       this.setMethod("SLIP");
     } else if (mode === "OUT") {
       badge.classList.add("out-pill");
-      badge.textContent = "OUT (DISPATCH)";
-      // OUT strictly uses Slips per specifications
+      badge.textContent = "OUT • Dispatch";
       methodSelector.style.display = "none";
-      processBtnText.textContent = "Deduct Stock From Inventory";
+      processBtnText.textContent = "Deduct Outgoing Stock";
       this.setMethod("SLIP");
     } else if (mode === "CAME_IN_AND_WENT_OUT") {
       badge.classList.add("transit-pill");
-      badge.textContent = "CAME IN & WENT OUT (TRANSIT)";
+      badge.textContent = "Transit • In & Out";
       methodSelector.style.display = "flex";
-      processBtnText.textContent = "Record In & Out Transit";
+      processBtnText.textContent = "Record Transit Batch";
       this.setMethod("SLIP");
     }
 
@@ -241,8 +269,35 @@ const App = {
     }
   },
 
-  // Client-Side Image Pre-Compression for Fast Mobile Uploads
   async compressImage(file, maxDimension = 1000, quality = 0.8) {
+    if (window.createImageBitmap) {
+      try {
+        const bitmap = await createImageBitmap(file);
+        let width = bitmap.width;
+        let height = bitmap.height;
+        if (width > height) {
+          if (width > maxDimension) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          }
+        } else if (height > maxDimension) {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(bitmap, 0, 0, width, height);
+        bitmap.close();
+        const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
+        if (blob) {
+          return new File([blob], file.name || "scan.jpg", { type: "image/jpeg" });
+        }
+      } catch (e) {
+        // Fallback to FileReader below
+      }
+    }
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = (event) => {
@@ -274,7 +329,7 @@ const App = {
               if (blob) {
                 resolve(new File([blob], file.name || "scan.jpg", { type: "image/jpeg" }));
               } else {
-                resolve(file); // Fallback to original
+                resolve(file);
               }
             },
             "image/jpeg",
@@ -289,18 +344,14 @@ const App = {
     });
   },
 
-  // Single Cardboard Slip Photo Handler
   async handleSlipPhoto(e) {
     let file = e.target.files[0];
     if (!file) return;
 
-    this.showLoading(true, "Preparing slip photo...");
+    this.showLoading(true, "Compressing slip...");
     try {
-      // Compress in browser: 5MB -> 80KB in 50ms
       file = await this.compressImage(file, 900, 0.8);
-    } catch (err) {
-      console.warn("Pre-compression skipped:", err);
-    }
+    } catch (err) {}
 
     this.showLoading(true, "Reading slip with Vision AI...");
     const formData = new FormData();
@@ -328,32 +379,28 @@ const App = {
           thumbnail: data.thumbnail || "",
           catalog_match: data.catalog_match
         });
-        this.showToast(`Found: ${p.description}`, "success");
+        this.showToast(`Matched: ${p.description}`, "success");
       } else {
-        this.showToast(data.error || "Could not read LN code on this slip", "error");
+        this.showToast(data.error || "Could not read LN code on slip", "error");
       }
     } catch (err) {
       this.showToast("Network error uploading slip photo", "error");
     } finally {
       this.showLoading(false);
-      e.target.value = ""; // Reset input so same file can be selected again
+      e.target.value = "";
     }
   },
 
-  // Bill Photo Handler
   async handleBillPhoto(e) {
     let file = e.target.files[0];
     if (!file) return;
 
-    this.showLoading(true, "Preparing bill photo...");
+    this.showLoading(true, "Compressing invoice...");
     try {
-      // Compress in browser: keep higher resolution for table reading
       file = await this.compressImage(file, 1400, 0.85);
-    } catch (err) {
-      console.warn("Pre-compression skipped:", err);
-    }
+    } catch (err) {}
 
-    this.showLoading(true, "Analyzing bill table & extracting items...");
+    this.showLoading(true, "Extracting bill rows with Vision AI...");
     const formData = new FormData();
     formData.append("file", file);
 
@@ -383,7 +430,7 @@ const App = {
         });
         this.showToast(`Extracted ${data.total_units} units from Invoice #${data.invoice_no}`, "success");
       } else {
-        this.showToast(data.error || "No items detected on this invoice image", "error");
+        this.showToast(data.error || "No items detected on invoice image", "error");
       }
     } catch (err) {
       this.showToast("Error processing bill photo", "error");
@@ -398,7 +445,7 @@ const App = {
     const code = input.value.trim().toUpperCase();
     if (!code) return;
 
-    this.showLoading(true, "Looking up product catalog...");
+    this.showLoading(true, "Looking up LN code...");
     try {
       const res = await fetch(`/api/lookup/${encodeURIComponent(code)}`);
       const data = await res.json();
@@ -433,7 +480,7 @@ const App = {
           catalog_match: false
         });
         input.value = "";
-        this.showToast(`Unlisted code ${code} added to batch`, "info");
+        this.showToast(`Unlisted code ${code} staged`, "info");
       }
     } catch (e) {
       this.showToast("Lookup failed", "error");
@@ -443,7 +490,6 @@ const App = {
   },
 
   addStagedItem(item) {
-    // If already in batch, increment quantity
     const existingIndex = this.state.stagedBatch.findIndex(x => x.ln_code === item.ln_code);
     if (existingIndex > -1) {
       this.state.stagedBatch[existingIndex].quantity += item.quantity || 1;
@@ -451,7 +497,7 @@ const App = {
         this.state.stagedBatch[existingIndex].thumbnail = item.thumbnail;
       }
     } else {
-      this.state.stagedBatch.unshift(item); // Add to top
+      this.state.stagedBatch.unshift(item);
     }
     this.renderStagedList();
   },
@@ -487,9 +533,8 @@ const App = {
     if (this.state.stagedBatch.length === 0) {
       container.innerHTML = `
         <div class="empty-state">
-          <div class="empty-icon">📷</div>
-          <p>No items scanned yet.</p>
-          <span>Snap a slip photo to see live product match</span>
+          <p>No items staged yet</p>
+          <span>Snap a photo or enter an LN code above to build your batch</span>
         </div>
       `;
       footer.classList.add("hidden");
@@ -503,7 +548,7 @@ const App = {
     container.innerHTML = this.state.stagedBatch.map((it, idx) => `
       <div class="staged-card">
         ${it.thumbnail ? `<img src="${it.thumbnail}" class="staged-thumb" alt="Slip Thumbnail">` : `
-          <div class="staged-thumb" style="display:flex;align-items:center;justify-content:center;color:#64748b;font-size:1.2rem;">📦</div>
+          <div class="staged-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:1rem;">📦</div>
         `}
         <div class="staged-details">
           <div class="staged-name">${this.escapeHtml(it.description)}</div>
@@ -519,7 +564,7 @@ const App = {
           <button class="qty-btn" onclick="App.updateQuantity(${idx}, 1)">+</button>
         </div>
         <button class="btn-remove-item" onclick="App.removeStagedItem(${idx})" title="Remove item">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
         </button>
       </div>
     `).join("");
@@ -530,7 +575,7 @@ const App = {
 
     const btn = document.getElementById("processBatchBtn");
     btn.disabled = true;
-    btn.textContent = "Processing Transaction...";
+    btn.innerHTML = `<span class="spinner" style="border-top-color:#fff;"></span><span>Committing to Google Sheets...</span>`;
 
     const payload = {
       username: this.state.currentUser.username,
@@ -559,15 +604,11 @@ const App = {
 
       if (res.ok && data.success) {
         this.playSuccessSound();
-        let toastMsg = `Processed ${data.processed.length} items successfully!`;
-        if (data.gsheet_synced) {
-          toastMsg += ` 🔄 Mirrored to Google Sheet`;
-        }
+        let toastMsg = `Saved ${data.processed.length} items to Google Sheets`;
         this.showToast(toastMsg, "success");
         this.state.stagedBatch = [];
         this.renderStagedList();
-        // Return to main dashboard
-        setTimeout(() => this.showScreen("employeeScreen"), 800);
+        setTimeout(() => this.showScreen("employeeScreen"), 700);
       } else {
         this.showToast(data.detail || "Failed to commit inventory batch", "error");
       }
@@ -575,8 +616,7 @@ const App = {
       this.showToast("Network error submitting batch", "error");
     } finally {
       btn.disabled = false;
-      const processBtnText = document.getElementById("processBtnText");
-      btn.textContent = processBtnText ? processBtnText.textContent : "Process Batch";
+      btn.innerHTML = `<span id="processBtnText">Commit Batch to Inventory</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
     }
   },
 
@@ -608,8 +648,8 @@ const App = {
   async loadInventory(forceRefresh = false) {
     const tbody = document.getElementById("inventoryTableBody");
     const empContainer = document.getElementById("empInventoryList");
-    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center">Loading inventory from Google Sheets...</td></tr>`;
-    if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder">Loading inventory from Google Sheets...</div>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center">${this.inlineLoaderHtml("Syncing sheet...")}</td></tr>`;
+    if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder">${this.inlineLoaderHtml("Syncing sheet...")}</div>`;
 
     this.state.empVisibleCount = this.state.empPageSize;
     this.state.adminVisibleCount = this.state.adminPageSize;
@@ -623,7 +663,6 @@ const App = {
       const data = await res.json();
       this.state.inventoryData = data.inventory || [];
       
-      // Update quick stats & synced time
       const totalUnits = this.state.inventoryData.reduce((acc, it) => acc + (Number(it.current_stock) > 0 ? Number(it.current_stock) : 0), 0);
       const itemsCountEl = document.getElementById("empTotalItemsCount");
       const unitsCountEl = document.getElementById("empTotalUnitsCount");
@@ -632,15 +671,15 @@ const App = {
 
       const subEl = document.getElementById("empSyncedSubtitle");
       if (subEl && data.synced_at) {
-        subEl.textContent = `Google Sheets Primary • Last synced ${data.synced_at.slice(11, 19)}`;
+        subEl.textContent = `Google Sheets Primary • Synced ${data.synced_at.slice(11, 19)}`;
       }
       this.updateSyncBadge({ inventory_count: this.state.inventoryData.length, synced_at: data.synced_at });
 
       this.applyAdminFilter(true);
       this.applyEmpFilter(true);
     } catch (e) {
-      if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:#f43f5e">Failed to load inventory</td></tr>`;
-      if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder" style="color:#f43f5e">Failed to load inventory</div>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--color-out)">Failed to load inventory</td></tr>`;
+      if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder" style="color:var(--color-out)">Failed to load inventory</div>`;
     }
   },
 
@@ -655,9 +694,8 @@ const App = {
     if (items.length === 0) {
       container.innerHTML = `
         <div class="empty-inventory-state">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--text-muted);margin-bottom:0.75rem;"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
-          <p style="font-weight:700;font-size:1.05rem;">No matching stock found</p>
-          <span style="font-size:0.85rem;color:var(--text-muted);">Try a different search or scan IN incoming items</span>
+          <p style="font-weight:600;font-size:0.95rem;color:var(--text-secondary);">No matching stock found</p>
+          <span style="font-size:0.8rem;color:var(--text-muted);">Try another search query or scan IN incoming stock</span>
         </div>
       `;
       if (pagWrap) pagWrap.innerHTML = "";
@@ -671,18 +709,18 @@ const App = {
       const stock = Number(it.current_stock || 0);
       const isPositive = stock > 0;
       const stockBadge = isPositive
-        ? `<span class="stock-badge in-stock">${stock} IN STOCK</span>`
-        : `<span class="stock-badge out-stock">0 STOCK</span>`;
+        ? `<span class="stock-badge in-stock">${stock} in stock</span>`
+        : `<span class="stock-badge out-stock">0 stock</span>`;
 
       const priceHtml = isAdmin
         ? `
             <div class="price-group">
               <div class="price-box">
-                <span class="price-lbl">Dealer Price</span>
+                <span class="price-lbl">Dealer</span>
                 <span class="price-val">${it.dealer_price != null ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</span>
               </div>
               <div class="price-box">
-                <span class="price-lbl">Consumer Price</span>
+                <span class="price-lbl">Consumer</span>
                 <span class="price-val">${it.consumer_price != null ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</span>
               </div>
             </div>
@@ -691,15 +729,17 @@ const App = {
 
       return `
         <div class="emp-inventory-card">
-          <div class="emp-inv-header">
-            <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
-            ${stockBadge}
-          </div>
-          <div class="emp-inv-body">
-            <h4 class="emp-inv-title">${this.escapeHtml(it.description || 'Godrej Item')}</h4>
-            <div class="emp-inv-meta">
-              <span class="meta-tag cat-tag">${this.escapeHtml(it.category || 'Godrej Interio')}</span>
-              ${it.sub_cat ? `<span class="meta-tag subcat-tag">${this.escapeHtml(it.sub_cat)}</span>` : ''}
+          <div>
+            <div class="emp-inv-header">
+              <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
+              ${stockBadge}
+            </div>
+            <div class="emp-inv-body">
+              <h4 class="emp-inv-title">${this.escapeHtml(it.description || 'Godrej Item')}</h4>
+              <div class="emp-inv-meta">
+                <span class="meta-tag">${this.escapeHtml(it.category || 'Godrej Interio')}</span>
+                ${it.sub_cat ? `<span class="meta-tag">${this.escapeHtml(it.sub_cat)}</span>` : ''}
+              </div>
             </div>
           </div>
           <div class="emp-inv-footer">
@@ -718,7 +758,7 @@ const App = {
       if (remaining > 0) {
         pagWrap.innerHTML = `
           <div class="pagination-meta">Showing ${visible.length} of ${items.length} items</div>
-          <button class="btn-load-more" onclick="App.loadMoreEmpInventory()">Load ${Math.min(remaining, this.state.empPageSize)} More (${remaining} remaining)</button>
+          <button class="btn-load-more" onclick="App.loadMoreEmpInventory()">Load ${Math.min(remaining, this.state.empPageSize)} More (${remaining} left)</button>
         `;
       } else if (items.length > this.state.empPageSize) {
         pagWrap.innerHTML = `<div class="pagination-meta">Showing all ${items.length} items</div>`;
@@ -749,14 +789,12 @@ const App = {
 
     let list = this.state.inventoryData || [];
 
-    // Filter by tab
     if (filterType === "in_stock") {
       list = list.filter(it => Number(it.current_stock || 0) > 0);
     } else if (filterType === "out_of_stock") {
       list = list.filter(it => Number(it.current_stock || 0) <= 0);
     }
 
-    // Filter by query
     if (query) {
       list = list.filter(it =>
         (it.ln_code && it.ln_code.toLowerCase().includes(query)) ||
@@ -781,7 +819,7 @@ const App = {
     const origHtml = btn ? btn.innerHTML : "";
     if (btn) {
       btn.disabled = true;
-      btn.innerHTML = `<span class="spinner" style="display:inline-block;width:13px;height:13px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;margin-right:6px;vertical-align:middle;"></span> Refreshing...`;
+      btn.innerHTML = `<span class="spinner"></span><span>Syncing...</span>`;
     }
 
     try {
@@ -816,7 +854,7 @@ const App = {
     const tbody = document.getElementById("inventoryTableBody");
     const pagWrap = document.getElementById("adminInventoryPagination");
     if (items.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center">No inventory records found yet. Scan IN items to start.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
       if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
@@ -825,13 +863,13 @@ const App = {
     const isAdmin = this.state.currentUser?.role === "admin";
     tbody.innerHTML = visible.map(it => `
       <tr>
-        <td style="font-family:monospace;font-weight:700;color:#38bdf8;">${it.ln_code}</td>
-        <td><strong>${this.escapeHtml(it.description)}</strong></td>
-        <td><span style="font-size:1.1rem;font-weight:800;color:${it.current_stock > 0 ? '#10b981' : '#f43f5e'}">${it.current_stock}</span></td>
-        <td>${this.escapeHtml(it.category || 'General')}</td>
-        <td>${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
-        <td>${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
-        <td style="font-size:0.8rem;color:#94a3b8;">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
+        <td style="font-family:var(--font-mono);font-weight:600;color:var(--accent-code);">${it.ln_code}</td>
+        <td><strong style="font-weight:600;">${this.escapeHtml(it.description)}</strong></td>
+        <td><span style="font-family:var(--font-mono);font-weight:700;color:${it.current_stock > 0 ? 'var(--color-in)' : 'var(--color-out)'}">${it.current_stock}</span></td>
+        <td style="color:var(--text-secondary);">${this.escapeHtml(it.category || 'General')}</td>
+        <td style="font-family:var(--font-mono);">${(isAdmin && it.dealer_price != null) ? `₹${Number(it.dealer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+        <td style="font-family:var(--font-mono);">${(isAdmin && it.consumer_price != null) ? `₹${Number(it.consumer_price || 0).toLocaleString('en-IN')}` : '—'}</td>
+        <td style="font-size:0.78rem;color:var(--text-muted);">${it.last_updated ? it.last_updated.slice(0, 16) : ''} (${this.escapeHtml(it.last_updated_by || 'system')})</td>
       </tr>
     `).join("");
 
@@ -840,7 +878,7 @@ const App = {
       if (remaining > 0) {
         pagWrap.innerHTML = `
           <div class="pagination-meta">Showing ${visible.length} of ${items.length} items</div>
-          <button class="btn-load-more" onclick="App.loadMoreAdminInventory()">Load ${Math.min(remaining, this.state.adminPageSize)} More (${remaining} remaining)</button>
+          <button class="btn-load-more" onclick="App.loadMoreAdminInventory()">Load ${Math.min(remaining, this.state.adminPageSize)} More (${remaining} left)</button>
         `;
       } else if (items.length > this.state.adminPageSize) {
         pagWrap.innerHTML = `<div class="pagination-meta">Showing all ${items.length} items</div>`;
@@ -875,7 +913,7 @@ const App = {
 
   async loadAuditLogs(forceRefresh = false) {
     const tbody = document.getElementById("logsTableBody");
-    tbody.innerHTML = `<tr><td colspan="8" class="text-center">Loading logs from Google Sheets...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs...")}</td></tr>`;
     const actionFilter = document.getElementById("logActionFilter").value;
 
     try {
@@ -888,30 +926,30 @@ const App = {
       const logs = data.logs || [];
 
       if (logs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center">No audit logs recorded yet.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);">No audit logs recorded yet.</td></tr>`;
         return;
       }
 
       tbody.innerHTML = logs.map(l => {
-        let badgeColor = "#10b981";
-        if (l.action === "OUT") badgeColor = "#f43f5e";
-        if (l.action === "CAME_IN_AND_WENT_OUT") badgeColor = "#6366f1";
+        let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
+        if (l.action === "OUT") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
+        if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
 
         return `
           <tr>
-            <td style="font-size:0.75rem;color:#94a3b8;">${l.timestamp.slice(0, 19)}</td>
-            <td><strong>${this.escapeHtml(l.employee_username)}</strong></td>
-            <td><span style="background:${badgeColor}22;color:${badgeColor};padding:3px 8px;border-radius:12px;font-weight:700;font-size:0.75rem;">${l.action}</span></td>
-            <td style="font-size:0.8rem;">${l.source}</td>
-            <td style="font-family:monospace;color:#38bdf8;">${l.ln_code}</td>
+            <td style="font-size:0.75rem;color:var(--text-muted);">${l.timestamp.slice(0, 19)}</td>
+            <td><strong style="font-weight:600;">${this.escapeHtml(l.employee_username)}</strong></td>
+            <td><span style="${badgeStyle}padding:2px 7px;border-radius:999px;font-weight:600;font-size:0.7rem;">${l.action}</span></td>
+            <td style="font-size:0.78rem;color:var(--text-secondary);">${l.source}</td>
+            <td style="font-family:var(--font-mono);color:var(--accent-code);font-weight:600;">${l.ln_code}</td>
             <td>${this.escapeHtml(l.description || '')}</td>
-            <td><strong>${l.quantity}</strong></td>
-            <td style="font-size:0.8rem;">${l.stock_before} ➔ ${l.stock_after}</td>
+            <td style="font-family:var(--font-mono);"><strong>${l.quantity}</strong></td>
+            <td style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-secondary);">${l.stock_before} → ${l.stock_after}</td>
           </tr>
         `;
       }).join("");
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:#f43f5e">Failed to load logs</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out)">Failed to load logs</td></tr>`;
     }
   },
 
@@ -926,16 +964,16 @@ const App = {
       container.innerHTML = users.map(u => `
         <div class="user-item-card">
           <div>
-            <div class="user-item-name">${this.escapeHtml(u.full_name)} <span style="font-weight:400;color:#94a3b8;">(@${u.username})</span></div>
+            <div class="user-item-name">${this.escapeHtml(u.full_name)} <span style="font-weight:400;color:var(--text-muted);">(@${u.username})</span></div>
             <div class="user-item-role">${u.role.toUpperCase()} • Joined ${u.created_at.slice(0,10)}</div>
           </div>
           ${u.username !== "admin" ? `
-            <button class="btn btn-secondary btn-sm" onclick="App.deleteUser(${u.id})" style="color:#f43f5e;">Delete</button>
-          ` : `<span style="font-size:0.75rem;color:#94a3b8;font-weight:600;">Main Admin</span>`}
+            <button class="btn btn-secondary btn-sm" onclick="App.deleteUser(${u.id})" style="color:var(--color-out);">Delete</button>
+          ` : `<span style="font-size:0.74rem;color:var(--text-muted);font-weight:600;">Primary Admin</span>`}
         </div>
       `).join("");
     } catch (e) {
-      container.innerHTML = `<p style="color:#f43f5e">Could not load users list</p>`;
+      container.innerHTML = `<p style="color:var(--color-out)">Could not load users list</p>`;
     }
   },
 
@@ -962,7 +1000,7 @@ const App = {
       });
       const data = await res.json();
       if (res.ok && data.success) {
-        this.showToast(`User @${username} created!`, "success");
+        this.showToast(`User @${username} created`, "success");
         this.hideAddUserModal();
         document.getElementById("addUserForm").reset();
         this.loadUsers();
@@ -1004,24 +1042,24 @@ const App = {
 
       const snaps = data.snapshots || [];
       if (snaps.length === 0) {
-        listEl.innerHTML = `<p style="color:var(--text-muted);font-size:0.85rem;">No snapshots saved yet. Click "Create Backup Snapshot Now" to save one.</p>`;
+        listEl.innerHTML = `<p style="color:var(--text-muted);font-size:0.82rem;">No snapshots saved yet.</p>`;
         return;
       }
 
       listEl.innerHTML = snaps.map(s => `
         <div class="snapshot-row">
           <div>
-            <div style="font-weight:700;font-size:0.88rem;color:#38bdf8;">${this.escapeHtml(s.backup_id)}</div>
-            <div style="font-size:0.75rem;color:var(--text-muted);">${this.escapeHtml(s.timestamp)}</div>
+            <div style="font-family:var(--font-mono);font-weight:600;font-size:0.82rem;color:var(--accent-code);">${this.escapeHtml(s.backup_id)}</div>
+            <div style="font-size:0.74rem;color:var(--text-muted);">${this.escapeHtml(s.timestamp)}</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-weight:800;font-size:0.9rem;">${s.total_units} units</div>
+            <div style="font-family:var(--font-mono);font-weight:700;font-size:0.85rem;">${s.total_units} units</div>
             <div style="font-size:0.72rem;color:var(--text-muted);">${s.item_count} SKUs</div>
           </div>
         </div>
       `).join("");
     } catch (e) {
-      listEl.innerHTML = `<p style="color:#f43f5e;font-size:0.85rem;">Failed to load backup snapshots.</p>`;
+      listEl.innerHTML = `<p style="color:var(--color-out);font-size:0.82rem;">Failed to load backup snapshots.</p>`;
     }
   },
 
@@ -1029,7 +1067,7 @@ const App = {
     const orig = btnEl ? btnEl.innerHTML : "";
     if (btnEl) {
       btnEl.disabled = true;
-      btnEl.innerHTML = `<span>Creating Snapshot...</span>`;
+      btnEl.innerHTML = `<span class="spinner" style="border-top-color:#fff;"></span><span>Saving...</span>`;
     }
     try {
       const res = await fetch("/api/backup-now", { method: "POST" });
@@ -1056,7 +1094,7 @@ const App = {
     const orig = btnEl ? btnEl.innerHTML : "";
     if (btnEl) {
       btnEl.disabled = true;
-      btnEl.innerHTML = `<span>Restoring...</span>`;
+      btnEl.innerHTML = `<span class="spinner"></span><span>Restoring...</span>`;
     }
     try {
       const res = await fetch("/api/restore-backup", {
@@ -1103,7 +1141,7 @@ const App = {
       });
       const data = await res.json();
       if (res.ok) {
-        this.showToast("API key updated successfully", "success");
+        this.showToast("API key updated", "success");
         document.getElementById("settingsGroqKey").value = "";
       }
     } catch (e) {
