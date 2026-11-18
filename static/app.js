@@ -14,13 +14,21 @@ const App = {
     adminSearchDebounceTimer: null,
     inventoryFilter: "all",
     adminInventoryFilter: "all",
+    empSort: "recent_desc",
+    adminSort: "recent_desc",
     selectionMode: false,
+    selectionTarget: "inventory", // 'inventory' or 'logs'
     selectedLnCodes: [],
+    selectedLogIds: [],
     holdTimer: null,
     holdStartX: 0,
     holdStartY: 0,
     justHeldLn: null,
+    justHeldLogId: null,
     auditLogs: [],
+    logsPageSize: 100,
+    logsVisibleCount: 100,
+    logsSearchDebounceTimer: null,
     theme: "dark",
     audioCtx: null
   },
@@ -715,18 +723,34 @@ const App = {
     const content = document.getElementById(tabId);
     if (content) content.classList.add("active");
 
-    if (tabId !== "inventoryTab" && this.state.selectionMode) {
+    if (this.state.selectionMode) {
       this.exitSelectionMode();
     }
     if (tabId === "backupsTab") this.loadBackups();
-    if (tabId === "logsTab") this.loadAuditLogs(true);
+    if (tabId === "logsTab") this.loadAuditLogs(false);
     if (tabId === "usersTab") this.loadUsers(true);
   },
 
   updateFilterPillCounts() {
     const all = this.state.inventoryData || [];
-    const inStockCount = all.filter(it => Number(it.current_stock || 0) > 0).length;
-    const outStockCount = all.filter(it => Number(it.current_stock || 0) <= 0).length;
+    let inStockCount = 0;
+    let zeroStockCount = 0;
+    let deficitCount = 0;
+    let lowStockCount = 0;
+    let highStockCount = 0;
+
+    for (let i = 0; i < all.length; i++) {
+      const s = all[i]._stockNum !== undefined ? all[i]._stockNum : Number(all[i].current_stock || 0);
+      if (s > 0) {
+        inStockCount++;
+        if (s >= 1 && s <= 3) lowStockCount++;
+        if (s >= 4) highStockCount++;
+      } else if (s === 0) {
+        zeroStockCount++;
+      } else {
+        deficitCount++;
+      }
+    }
 
     const setTxt = (id, txt) => {
       const el = document.getElementById(id);
@@ -734,17 +758,28 @@ const App = {
     };
     setTxt("empFilterAll", `All Items (${all.length})`);
     setTxt("empFilterInStock", `In Stock (${inStockCount})`);
-    setTxt("empFilterOutStock", `Out of Stock (${outStockCount})`);
+    setTxt("empFilterZeroStock", `Zero Stock (${zeroStockCount})`);
+    setTxt("empFilterDeficit", `Deficit (${deficitCount})`);
+    setTxt("empFilterLowStock", `Low Stock 1–3 (${lowStockCount})`);
+    setTxt("empFilterHighStock", `Bulk 4+ (${highStockCount})`);
+
     setTxt("adminFilterAll", `All Items (${all.length})`);
     setTxt("adminFilterInStock", `In Stock (${inStockCount})`);
-    setTxt("adminFilterOutStock", `Out of Stock (${outStockCount})`);
+    setTxt("adminFilterZeroStock", `Zero Stock (${zeroStockCount})`);
+    setTxt("adminFilterDeficit", `Deficit (${deficitCount})`);
+    setTxt("adminFilterLowStock", `Low Stock 1–3 (${lowStockCount})`);
+    setTxt("adminFilterHighStock", `Bulk 4+ (${highStockCount})`);
   },
 
   async loadInventory(forceRefresh = false) {
     const tbody = document.getElementById("inventoryTableBody");
     const empContainer = document.getElementById("empInventoryList");
-    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center">${this.inlineLoaderHtml("Syncing sheet...")}</td></tr>`;
-    if (empContainer) empContainer.innerHTML = `<div class="loading-placeholder">${this.inlineLoaderHtml("Syncing sheet...")}</div>`;
+    if (tbody && (!this.state.inventoryData || this.state.inventoryData.length === 0)) {
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center">${this.inlineLoaderHtml("Syncing sheet...")}</td></tr>`;
+    }
+    if (empContainer && (!this.state.inventoryData || this.state.inventoryData.length === 0)) {
+      empContainer.innerHTML = `<div class="loading-placeholder">${this.inlineLoaderHtml("Syncing sheet...")}</div>`;
+    }
 
     this.state.empVisibleCount = this.state.empPageSize;
     this.state.adminVisibleCount = this.state.adminPageSize;
@@ -756,9 +791,17 @@ const App = {
       const url = `/api/inventory?role=${encodeURIComponent(role)}${forceRefresh ? "&refresh=1" : ""}`;
       const res = await fetch(url);
       const data = await res.json();
-      this.state.inventoryData = data.inventory || [];
+      const rawInv = data.inventory || [];
+
+      // Pre-compute normalized search string & numeric stock once for O(1) filtering & sorting
+      for (let i = 0; i < rawInv.length; i++) {
+        const it = rawInv[i];
+        it._stockNum = Number(it.current_stock || 0);
+        it._searchStr = `${it.ln_code || ""} ${it.description || ""} ${it.category || ""} ${it.sub_cat || ""}`.toLowerCase();
+      }
+      this.state.inventoryData = rawInv;
       
-      const totalUnits = this.state.inventoryData.reduce((acc, it) => acc + (Number(it.current_stock) > 0 ? Number(it.current_stock) : 0), 0);
+      const totalUnits = this.state.inventoryData.reduce((acc, it) => acc + (it._stockNum > 0 ? it._stockNum : 0), 0);
       const itemsCountEl = document.getElementById("empTotalItemsCount");
       const unitsCountEl = document.getElementById("empTotalUnitsCount");
       if (itemsCountEl) itemsCountEl.textContent = this.state.inventoryData.length;
@@ -780,6 +823,118 @@ const App = {
     }
   },
 
+  matchesQuantityFilter(stock, filterType, minVal, maxVal) {
+    if (filterType === "in_stock" && !(stock > 0)) return false;
+    if ((filterType === "zero_stock" || filterType === "out_of_stock") && stock !== 0) return false;
+    if (filterType === "deficit" && !(stock < 0)) return false;
+    if (filterType === "low_stock" && !(stock >= 1 && stock <= 3)) return false;
+    if (filterType === "high_stock" && !(stock >= 4)) return false;
+
+    if (minVal !== null && stock < minVal) return false;
+    if (maxVal !== null && stock > maxVal) return false;
+    return true;
+  },
+
+  sortInventoryList(list, sortKey) {
+    const arr = list.slice();
+    const key = sortKey || "recent_desc";
+    arr.sort((a, b) => {
+      if (key === "qty_desc") {
+        const diff = (b._stockNum ?? Number(b.current_stock || 0)) - (a._stockNum ?? Number(a.current_stock || 0));
+        return diff !== 0 ? diff : (a.description || "").localeCompare(b.description || "");
+      }
+      if (key === "qty_asc") {
+        const diff = (a._stockNum ?? Number(a.current_stock || 0)) - (b._stockNum ?? Number(b.current_stock || 0));
+        return diff !== 0 ? diff : (a.description || "").localeCompare(b.description || "");
+      }
+      if (key === "name_asc") {
+        return (a.description || "").localeCompare(b.description || "", undefined, { numeric: true, sensitivity: "base" });
+      }
+      if (key === "name_desc") {
+        return (b.description || "").localeCompare(a.description || "", undefined, { numeric: true, sensitivity: "base" });
+      }
+      if (key === "ln_asc") {
+        return (a.ln_code || "").localeCompare(b.ln_code || "");
+      }
+      if (key === "ln_desc") {
+        return (b.ln_code || "").localeCompare(a.ln_code || "");
+      }
+      if (key === "recent_asc") {
+        return (a.last_updated || "").localeCompare(b.last_updated || "");
+      }
+      // Default: recent_desc
+      return (b.last_updated || "").localeCompare(a.last_updated || "");
+    });
+    return arr;
+  },
+
+  setEmpSort(sortKey) {
+    this.state.empSort = sortKey || "recent_desc";
+    this.applyEmpFilter(true);
+  },
+
+  setAdminSort(sortKey) {
+    this.state.adminSort = sortKey || "recent_desc";
+    const sel = document.getElementById("adminSortSelect");
+    if (sel && sel.value !== this.state.adminSort) {
+      if ([...sel.options].some(o => o.value === this.state.adminSort)) {
+        sel.value = this.state.adminSort;
+      }
+    }
+    this.updateAdminSortHeaderIndicators();
+    this.applyAdminFilter(true);
+  },
+
+  toggleAdminTableSort(col) {
+    const cur = this.state.adminSort || "recent_desc";
+    let next = "recent_desc";
+    if (col === "qty") {
+      next = cur === "qty_desc" ? "qty_asc" : "qty_desc";
+    } else if (col === "name") {
+      next = cur === "name_asc" ? "name_desc" : "name_asc";
+    } else if (col === "ln") {
+      next = cur === "ln_asc" ? "ln_desc" : "ln_asc";
+    } else if (col === "recent") {
+      next = cur === "recent_desc" ? "recent_asc" : "recent_desc";
+    }
+    this.setAdminSort(next);
+  },
+
+  updateAdminSortHeaderIndicators() {
+    const map = {
+      ln: document.getElementById("sortInd_ln"),
+      name: document.getElementById("sortInd_name"),
+      qty: document.getElementById("sortInd_qty"),
+      recent: document.getElementById("sortInd_recent")
+    };
+    Object.values(map).forEach(el => { if (el) el.textContent = ""; });
+    const cur = this.state.adminSort || "recent_desc";
+    if (cur === "ln_asc" && map.ln) map.ln.textContent = "↑";
+    if (cur === "ln_desc" && map.ln) map.ln.textContent = "↓";
+    if (cur === "name_asc" && map.name) map.name.textContent = "↑";
+    if (cur === "name_desc" && map.name) map.name.textContent = "↓";
+    if (cur === "qty_asc" && map.qty) map.qty.textContent = "↑";
+    if (cur === "qty_desc" && map.qty) map.qty.textContent = "↓";
+    if (cur === "recent_asc" && map.recent) map.recent.textContent = "↑";
+    if (cur === "recent_desc" && map.recent) map.recent.textContent = "↓";
+  },
+
+  clearEmpQtyRange() {
+    const minEl = document.getElementById("empMinQtyInput");
+    const maxEl = document.getElementById("empMaxQtyInput");
+    if (minEl) minEl.value = "";
+    if (maxEl) maxEl.value = "";
+    this.applyEmpFilter(true);
+  },
+
+  clearAdminQtyRange() {
+    const minEl = document.getElementById("adminMinQtyInput");
+    const maxEl = document.getElementById("adminMaxQtyInput");
+    if (minEl) minEl.value = "";
+    if (maxEl) maxEl.value = "";
+    this.applyAdminFilter(true);
+  },
+
   renderEmployeeInventory(items, resetWindow = false) {
     if (resetWindow) {
       this.state.empVisibleCount = this.state.empPageSize;
@@ -792,7 +947,7 @@ const App = {
       container.innerHTML = `
         <div class="empty-inventory-state">
           <p style="font-weight:600;font-size:0.95rem;color:var(--text-secondary);">No matching stock found</p>
-          <span style="font-size:0.8rem;color:var(--text-muted);">Try another search query or scan IN incoming stock</span>
+          <span style="font-size:0.8rem;color:var(--text-muted);">Try another search query, quantity filter, or scan IN incoming stock</span>
         </div>
       `;
       if (pagWrap) pagWrap.innerHTML = "";
@@ -801,17 +956,18 @@ const App = {
 
     const visible = items.slice(0, this.state.empVisibleCount);
     const isAdmin = this.state.currentUser?.role === "admin";
-    const selectedSet = new Set(this.state.selectedLnCodes || []);
+    const isInvSelection = this.state.selectionMode && this.state.selectionTarget === "inventory";
+    const selectedSet = new Set(isInvSelection ? (this.state.selectedLnCodes || []) : []);
 
     container.innerHTML = visible.map(it => {
-      const stock = Number(it.current_stock || 0);
+      const stock = it._stockNum !== undefined ? it._stockNum : Number(it.current_stock || 0);
       const isPositive = stock > 0;
       const isSelected = selectedSet.has(it.ln_code);
       const stockBadge = isPositive
         ? `<span class="stock-badge in-stock">${stock} in stock</span>`
         : `<span class="stock-badge out-stock">${stock} stock</span>`;
 
-      const selectIndicator = this.state.selectionMode
+      const selectIndicator = isInvSelection
         ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
         : "";
 
@@ -901,23 +1057,33 @@ const App = {
     const query = input ? input.value.trim().toLowerCase() : "";
     const filterType = this.state.inventoryFilter || "all";
 
-    let list = this.state.inventoryData || [];
+    const minRaw = document.getElementById("empMinQtyInput")?.value;
+    const maxRaw = document.getElementById("empMaxQtyInput")?.value;
+    const minVal = (minRaw !== undefined && minRaw !== "" && !isNaN(Number(minRaw))) ? Number(minRaw) : null;
+    const maxVal = (maxRaw !== undefined && maxRaw !== "" && !isNaN(Number(maxRaw))) ? Number(maxRaw) : null;
 
-    if (filterType === "in_stock") {
-      list = list.filter(it => Number(it.current_stock || 0) > 0);
-    } else if (filterType === "out_of_stock") {
-      list = list.filter(it => Number(it.current_stock || 0) <= 0);
+    const clearBtn = document.getElementById("empClearQtyBtn");
+    if (clearBtn) {
+      clearBtn.classList.toggle("hidden", minVal === null && maxVal === null);
     }
 
-    if (query) {
-      list = list.filter(it =>
+    const src = this.state.inventoryData || [];
+    const filtered = [];
+
+    for (let i = 0; i < src.length; i++) {
+      const it = src[i];
+      const stock = it._stockNum !== undefined ? it._stockNum : Number(it.current_stock || 0);
+      if (!this.matchesQuantityFilter(stock, filterType, minVal, maxVal)) continue;
+      if (query && !(it._searchStr ? it._searchStr.includes(query) : (
         (it.ln_code && it.ln_code.toLowerCase().includes(query)) ||
         (it.description && it.description.toLowerCase().includes(query)) ||
         (it.category && it.category.toLowerCase().includes(query)) ||
         (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
-      );
+      ))) continue;
+      filtered.push(it);
     }
-    return list;
+
+    return this.sortInventoryList(filtered, this.state.empSort);
   },
 
   applyEmpFilter(resetWindow = true) {
@@ -929,7 +1095,7 @@ const App = {
     clearTimeout(this.state.searchDebounceTimer);
     this.state.searchDebounceTimer = setTimeout(() => {
       this.applyEmpFilter(true);
-    }, 120);
+    }, 90);
   },
 
   async refreshFromSheets(btnEl, silent = false) {
@@ -972,19 +1138,20 @@ const App = {
     const tbody = document.getElementById("inventoryTableBody");
     const pagWrap = document.getElementById("adminInventoryPagination");
     if (items.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);">No inventory records found yet.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="text-center" style="color:var(--text-muted);">No inventory records match the current filters.</td></tr>`;
       if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
 
     const visible = items.slice(0, this.state.adminVisibleCount);
     const isAdmin = this.state.currentUser?.role === "admin";
-    const selectedSet = new Set(this.state.selectedLnCodes || []);
+    const isInvSelection = this.state.selectionMode && this.state.selectionTarget === "inventory";
+    const selectedSet = new Set(isInvSelection ? (this.state.selectedLnCodes || []) : []);
 
     tbody.innerHTML = visible.map(it => {
       const safeLn = this.escapeHtml(it.ln_code);
       const isSelected = selectedSet.has(it.ln_code);
-      const selectIndicator = this.state.selectionMode
+      const selectIndicator = isInvSelection
         ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}" style="margin-right:0.45rem;vertical-align:middle;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
         : "";
 
@@ -1040,23 +1207,34 @@ const App = {
   getFilteredAdminList() {
     const query = (document.getElementById("inventorySearchInput")?.value || "").trim().toLowerCase();
     const filterType = this.state.adminInventoryFilter || "all";
-    let list = this.state.inventoryData || [];
 
-    if (filterType === "in_stock") {
-      list = list.filter(it => Number(it.current_stock || 0) > 0);
-    } else if (filterType === "out_of_stock") {
-      list = list.filter(it => Number(it.current_stock || 0) <= 0);
+    const minRaw = document.getElementById("adminMinQtyInput")?.value;
+    const maxRaw = document.getElementById("adminMaxQtyInput")?.value;
+    const minVal = (minRaw !== undefined && minRaw !== "" && !isNaN(Number(minRaw))) ? Number(minRaw) : null;
+    const maxVal = (maxRaw !== undefined && maxRaw !== "" && !isNaN(Number(maxRaw))) ? Number(maxRaw) : null;
+
+    const clearBtn = document.getElementById("adminClearQtyBtn");
+    if (clearBtn) {
+      clearBtn.classList.toggle("hidden", minVal === null && maxVal === null);
     }
 
-    if (query) {
-      list = list.filter(it =>
-        it.ln_code.toLowerCase().includes(query) ||
+    const src = this.state.inventoryData || [];
+    const filtered = [];
+
+    for (let i = 0; i < src.length; i++) {
+      const it = src[i];
+      const stock = it._stockNum !== undefined ? it._stockNum : Number(it.current_stock || 0);
+      if (!this.matchesQuantityFilter(stock, filterType, minVal, maxVal)) continue;
+      if (query && !(it._searchStr ? it._searchStr.includes(query) : (
+        (it.ln_code && it.ln_code.toLowerCase().includes(query)) ||
         (it.description && it.description.toLowerCase().includes(query)) ||
         (it.category && it.category.toLowerCase().includes(query)) ||
         (it.sub_cat && it.sub_cat.toLowerCase().includes(query))
-      );
+      ))) continue;
+      filtered.push(it);
     }
-    return list;
+
+    return this.sortInventoryList(filtered, this.state.adminSort);
   },
 
   applyAdminFilter(resetWindow = true) {
@@ -1068,15 +1246,15 @@ const App = {
     clearTimeout(this.state.adminSearchDebounceTimer);
     this.state.adminSearchDebounceTimer = setTimeout(() => {
       this.applyAdminFilter(true);
-    }, 120);
+    }, 90);
   },
 
-  // ----------------- HOLD / RIGHT-CLICK SELECTION MODE -----------------
+  // ----------------- HOLD / RIGHT-CLICK SELECTION MODE (INVENTORY & AUDIT LOGS) -----------------
   handleItemContextMenu(e, lnCode) {
     e.preventDefault();
     e.stopPropagation();
     clearTimeout(this.state.holdTimer);
-    this.enterOrToggleSelection(lnCode, true);
+    this.enterOrToggleSelection(lnCode, true, "inventory");
   },
 
   handleItemPointerDown(e, lnCode) {
@@ -1091,8 +1269,41 @@ const App = {
       if (navigator.vibrate) {
         try { navigator.vibrate(35); } catch (err) {}
       }
-      this.enterOrToggleSelection(lnCode, true);
+      this.enterOrToggleSelection(lnCode, true, "inventory");
     }, 420);
+  },
+
+  handleLogContextMenu(e, logId) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearTimeout(this.state.holdTimer);
+    this.enterOrToggleSelection(logId, true, "logs");
+  },
+
+  handleLogPointerDown(e, logId) {
+    if (e.button && e.button !== 0) return;
+    clearTimeout(this.state.holdTimer);
+    this.state.holdStartX = e.clientX || 0;
+    this.state.holdStartY = e.clientY || 0;
+    this.state.justHeldLogId = null;
+
+    this.state.holdTimer = setTimeout(() => {
+      this.state.justHeldLogId = logId;
+      if (navigator.vibrate) {
+        try { navigator.vibrate(35); } catch (err) {}
+      }
+      this.enterOrToggleSelection(logId, true, "logs");
+    }, 420);
+  },
+
+  handleLogClick(e, logId) {
+    if (this.state.justHeldLogId === logId) {
+      this.state.justHeldLogId = null;
+      return;
+    }
+    if (!this.state.selectionMode || this.state.selectionTarget !== "logs") return;
+    e.preventDefault();
+    this.enterOrToggleSelection(logId, false, "logs");
   },
 
   handleItemPointerMove(e) {
@@ -1117,32 +1328,45 @@ const App = {
       this.state.justHeldLn = null;
       return;
     }
-    if (!this.state.selectionMode) return;
+    if (!this.state.selectionMode || this.state.selectionTarget !== "inventory") return;
     e.preventDefault();
-    this.enterOrToggleSelection(lnCode, false);
+    this.enterOrToggleSelection(lnCode, false, "inventory");
   },
 
-  enterOrToggleSelection(lnCode, forceSelect = false) {
-    const set = new Set(this.state.selectedLnCodes || []);
+  enterOrToggleSelection(itemId, forceSelect = false, targetType = "inventory") {
+    if (this.state.selectionMode && this.state.selectionTarget !== targetType) {
+      this.state.selectedLnCodes = [];
+      this.state.selectedLogIds = [];
+    }
+    this.state.selectionTarget = targetType;
+
+    const listKey = targetType === "logs" ? "selectedLogIds" : "selectedLnCodes";
+    const set = new Set(this.state[listKey] || []);
+
     if (!this.state.selectionMode) {
       this.state.selectionMode = true;
-      set.add(lnCode);
+      set.add(itemId);
     } else if (forceSelect) {
-      set.add(lnCode);
+      set.add(itemId);
     } else {
-      if (set.has(lnCode)) {
-        set.delete(lnCode);
+      if (set.has(itemId)) {
+        set.delete(itemId);
       } else {
-        set.add(lnCode);
+        set.add(itemId);
       }
     }
 
-    this.state.selectedLnCodes = Array.from(set);
-    if (this.state.selectedLnCodes.length === 0) {
+    this.state[listKey] = Array.from(set);
+    if (this.state[listKey].length === 0) {
       this.state.selectionMode = false;
     }
-    this.applyEmpFilter(false);
-    this.applyAdminFilter(false);
+
+    if (targetType === "logs") {
+      this.filterAuditLogs(false);
+    } else {
+      this.applyEmpFilter(false);
+      this.applyAdminFilter(false);
+    }
     this.updateSelectionBarUI();
   },
 
@@ -1155,6 +1379,25 @@ const App = {
   },
 
   toggleSelectAllInventory() {
+    if (this.state.selectionTarget === "logs") {
+      const currentLogs = this.getFilteredAuditLogs();
+      if (!currentLogs.length) return;
+      const set = new Set(this.state.selectedLogIds || []);
+      const allSelected = currentLogs.every(l => set.has(l.id));
+      if (allSelected) {
+        currentLogs.forEach(l => set.delete(l.id));
+      } else {
+        currentLogs.forEach(l => set.add(l.id));
+      }
+      this.state.selectedLogIds = Array.from(set);
+      if (this.state.selectedLogIds.length > 0) {
+        this.state.selectionMode = true;
+      }
+      this.filterAuditLogs(false);
+      this.updateSelectionBarUI();
+      return;
+    }
+
     const currentList = this.getActiveInventoryList();
     if (!currentList.length) return;
     const set = new Set(this.state.selectedLnCodes || []);
@@ -1176,10 +1419,16 @@ const App = {
   },
 
   exitSelectionMode() {
+    const prevTarget = this.state.selectionTarget;
     this.state.selectionMode = false;
     this.state.selectedLnCodes = [];
-    this.applyEmpFilter(false);
-    this.applyAdminFilter(false);
+    this.state.selectedLogIds = [];
+    if (prevTarget === "logs") {
+      this.filterAuditLogs(false);
+    } else {
+      this.applyEmpFilter(false);
+      this.applyAdminFilter(false);
+    }
     this.updateSelectionBarUI();
   },
 
@@ -1187,7 +1436,10 @@ const App = {
     const bar = document.getElementById("selectionActionBar");
     if (!bar) return;
 
-    const count = (this.state.selectedLnCodes || []).length;
+    const isLogs = this.state.selectionTarget === "logs";
+    const selectedArr = isLogs ? (this.state.selectedLogIds || []) : (this.state.selectedLnCodes || []);
+    const count = selectedArr.length;
+
     if (!this.state.selectionMode || count === 0) {
       bar.classList.add("hidden");
       return;
@@ -1198,28 +1450,77 @@ const App = {
     const delBtnTxt = document.getElementById("deleteSelectedBtnText");
     const selectAllBtn = document.getElementById("selectAllInventoryBtn");
 
-    if (countBadge) countBadge.textContent = `${count} Selected`;
+    if (countBadge) countBadge.textContent = isLogs ? `${count} Log${count > 1 ? 's' : ''} Selected` : `${count} Selected`;
     if (delBtnTxt) delBtnTxt.textContent = `Delete (${count})`;
 
     if (selectAllBtn) {
-      const currentList = this.getActiveInventoryList();
-      const set = new Set(this.state.selectedLnCodes || []);
-      const allSelected = currentList.length > 0 && currentList.every(it => set.has(it.ln_code));
-      selectAllBtn.textContent = allSelected ? "Deselect All" : `Select All (${currentList.length})`;
+      if (isLogs) {
+        const currentLogs = this.getFilteredAuditLogs();
+        const set = new Set(this.state.selectedLogIds || []);
+        const allSelected = currentLogs.length > 0 && currentLogs.every(l => set.has(l.id));
+        selectAllBtn.textContent = allSelected ? "Deselect All" : `Select All (${currentLogs.length})`;
+      } else {
+        const currentList = this.getActiveInventoryList();
+        const set = new Set(this.state.selectedLnCodes || []);
+        const allSelected = currentList.length > 0 && currentList.every(it => set.has(it.ln_code));
+        selectAllBtn.textContent = allSelected ? "Deselect All" : `Select All (${currentList.length})`;
+      }
     }
   },
 
   openDeleteSelectedModal() {
+    const titleEl = document.getElementById("deleteModalTitleText");
+    const promptEl = document.getElementById("deleteModalPromptText");
+    const listEl = document.getElementById("deleteModalItemsList");
+    const noteEl = document.getElementById("deleteModalNoteText");
+
+    if (this.state.selectionTarget === "logs") {
+      const selectedSet = new Set(this.state.selectedLogIds || []);
+      const logs = (this.state.auditLogs || []).filter(l => selectedSet.has(l.id));
+      if (logs.length === 0) {
+        this.showToast("Select at least one audit log to delete", "error");
+        return;
+      }
+
+      if (titleEl) {
+        titleEl.textContent = logs.length === 1
+          ? "Confirm Audit Log Deletion"
+          : `Delete ${logs.length} Selected Audit Logs`;
+      }
+      if (promptEl) {
+        promptEl.innerHTML = logs.length === 1
+          ? `Are you sure you want to permanently delete this audit log entry from <strong>Audit_Log</strong> in Google Sheets?`
+          : `Are you sure you want to permanently delete these <strong>${logs.length} audit log records</strong> from <strong>Audit_Log</strong> in Google Sheets?`;
+      }
+      if (noteEl) {
+        noteEl.innerHTML = `This action permanently removes the selected log row(s) directly from the <strong>Audit_Log</strong> worksheet in Google Sheets.`;
+      }
+      if (listEl) {
+        listEl.innerHTML = logs.map(l => {
+          const badgeCls = (l.action === "OUT" || l.action === "DELETE") ? "stock-badge out-stock" : "stock-badge in-stock";
+          return `
+            <div class="delete-stock-item-box">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+                <span class="emp-inv-code">${this.escapeHtml(l.ln_code || l.id)}</span>
+                <span class="${badgeCls}">${this.escapeHtml(l.action)} (Qty: ${l.quantity})</span>
+              </div>
+              <div style="font-weight:600;font-size:0.84rem;margin-top:0.25rem;color:var(--text-main);">${this.escapeHtml(l.description || 'Godrej Item')}</div>
+              <div style="font-size:0.74rem;color:var(--text-muted);margin-top:0.15rem;">${this.escapeHtml((l.timestamp || '').slice(0, 19))} • By ${this.escapeHtml(l.employee_username || 'system')}</div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      document.getElementById("deleteStockModal").classList.remove("hidden");
+      return;
+    }
+
     const selectedSet = new Set(this.state.selectedLnCodes || []);
     const items = (this.state.inventoryData || []).filter(it => selectedSet.has(it.ln_code));
     if (items.length === 0) {
       this.showToast("Select at least one product to delete", "error");
       return;
     }
-
-    const titleEl = document.getElementById("deleteModalTitleText");
-    const promptEl = document.getElementById("deleteModalPromptText");
-    const listEl = document.getElementById("deleteModalItemsList");
 
     if (titleEl) {
       titleEl.textContent = items.length === 1
@@ -1230,6 +1531,9 @@ const App = {
       promptEl.innerHTML = items.length === 1
         ? `Are you sure you want to permanently delete this product from <strong>Live_Inventory</strong> in Google Sheets?`
         : `Are you sure you want to permanently delete these <strong>${items.length} products</strong> from <strong>Live_Inventory</strong> in Google Sheets?`;
+    }
+    if (noteEl) {
+      noteEl.innerHTML = `This action removes the selected row(s) directly from the Google Sheet and logs a <code>DELETE</code> record in <strong>Audit_Log</strong>.`;
     }
     if (listEl) {
       listEl.innerHTML = items.map(it => {
@@ -1252,6 +1556,7 @@ const App = {
   },
 
   openDeleteStockModal(lnCode) {
+    this.state.selectionTarget = "inventory";
     this.state.selectionMode = true;
     this.state.selectedLnCodes = [lnCode];
     this.updateSelectionBarUI();
@@ -1263,8 +1568,9 @@ const App = {
   },
 
   async confirmDeleteStock() {
-    const lnCodes = this.state.selectedLnCodes || [];
-    if (lnCodes.length === 0) return;
+    const isLogs = this.state.selectionTarget === "logs";
+    const targetIds = isLogs ? (this.state.selectedLogIds || []) : (this.state.selectedLnCodes || []);
+    if (targetIds.length === 0) return;
 
     const btn = document.getElementById("confirmDeleteStockBtn");
     const origHtml = btn ? btn.innerHTML : "";
@@ -1275,23 +1581,44 @@ const App = {
 
     try {
       const username = this.state.currentUser?.username || "admin";
+      if (isLogs) {
+        const res = await fetch("/api/logs/delete-batch?role=admin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ log_ids: targetIds, username, role: "admin" })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          this.playSuccessSound();
+          this.showToast(data.message || `Deleted ${targetIds.length} audit log(s) from Google Sheet`, "success");
+          const delSet = new Set(targetIds);
+          this.state.auditLogs = (this.state.auditLogs || []).filter(l => !delSet.has(l.id));
+          this.hideDeleteStockModal();
+          this.exitSelectionMode();
+          this.filterAuditLogs(false);
+        } else {
+          this.showToast(data.detail || "Failed to delete selected audit logs", "error");
+        }
+        return;
+      }
+
       const res = await fetch("/api/inventory/delete-batch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ln_codes: lnCodes, username })
+        body: JSON.stringify({ ln_codes: targetIds, username })
       });
       const data = await res.json();
       if (res.ok && data.success) {
         this.playSuccessSound();
-        this.showToast(data.message || `Deleted ${lnCodes.length} product(s) from Google Sheet`, "success");
+        this.showToast(data.message || `Deleted ${targetIds.length} product(s) from Google Sheet`, "success");
         this.hideDeleteStockModal();
         this.exitSelectionMode();
-        await this.loadInventory(true);
+        await this.loadInventory(false);
       } else {
         this.showToast(data.detail || "Failed to delete selected stock", "error");
       }
     } catch (e) {
-      this.showToast("Network error deleting selected stock", "error");
+      this.showToast("Network error during deletion", "error");
     } finally {
       if (btn) {
         btn.disabled = false;
@@ -1305,62 +1632,102 @@ const App = {
     const adminTbody = document.getElementById("logsTableBody");
     if (!adminTbody) return;
 
-    adminTbody.innerHTML = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs from Google Sheets...")}</td></tr>`;
-
-    const adminFilterEl = document.getElementById("logActionFilter");
-    const actionFilter = (adminFilterEl && adminFilterEl.value) || "";
+    if (forceRefresh || !this.state.auditLogs || this.state.auditLogs.length === 0) {
+      adminTbody.innerHTML = `<tr><td colspan="8" class="text-center">${this.inlineLoaderHtml("Loading logs from Google Sheets...")}</td></tr>`;
+    }
 
     try {
       const params = new URLSearchParams();
       params.set("role", "admin");
-      if (actionFilter) params.set("action", actionFilter);
+      params.set("limit", "5000");
       if (forceRefresh) params.set("refresh", "1");
-      const qs = params.toString() ? `?${params.toString()}` : "";
-      const res = await fetch(`/api/logs${qs}`);
+      const res = await fetch(`/api/logs?${params.toString()}`);
       if (res.status === 403) {
         adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Audit logs are strictly restricted to admin users.</td></tr>`;
         return;
       }
       const data = await res.json();
-      this.state.auditLogs = data.logs || [];
+      const rawLogs = data.logs || [];
+      for (let i = 0; i < rawLogs.length; i++) {
+        const l = rawLogs[i];
+        l._searchStr = `${l.id || ""} ${l.ln_code || ""} ${l.description || ""} ${l.employee_username || ""} ${l.invoice_no || ""} ${l.notes || ""} ${l.action || ""} ${l.source || ""}`.toLowerCase();
+      }
+      this.state.auditLogs = rawLogs;
+      this.state.logsVisibleCount = this.state.logsPageSize;
 
-      this.filterAuditLogs();
+      this.filterAuditLogs(true);
     } catch (e) {
       adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--color-out);padding:2rem;">Failed to load logs from Google Sheets</td></tr>`;
     }
   },
 
-  filterAuditLogs() {
-    if (this.state.currentUser?.role !== "admin") return;
+  getFilteredAuditLogs() {
     const adminSearch = (document.getElementById("logSearchInput")?.value || "").trim().toLowerCase();
+    const actionFilter = (document.getElementById("logActionFilter")?.value || "").trim();
     const all = this.state.auditLogs || [];
-    if (!adminSearch) {
-      this.renderAuditLogsTable(all);
-      return;
+    if (!adminSearch && !actionFilter) {
+      return all;
     }
 
-    const filtered = all.filter(l => {
-      const ln = (l.ln_code || "").toLowerCase();
-      const desc = (l.description || "").toLowerCase();
-      const emp = (l.employee_username || "").toLowerCase();
-      const inv = (l.invoice_no || "").toLowerCase();
-      const act = (l.action || "").toLowerCase();
-      return ln.includes(adminSearch) || desc.includes(adminSearch) || emp.includes(adminSearch) || inv.includes(adminSearch) || act.includes(adminSearch);
-    });
+    const filtered = [];
+    for (let i = 0; i < all.length; i++) {
+      const l = all[i];
+      if (actionFilter && l.action !== actionFilter) continue;
+      if (adminSearch && !(l._searchStr ? l._searchStr.includes(adminSearch) : (
+        (l.ln_code || "").toLowerCase().includes(adminSearch) ||
+        (l.description || "").toLowerCase().includes(adminSearch) ||
+        (l.employee_username || "").toLowerCase().includes(adminSearch)
+      ))) continue;
+      filtered.push(l);
+    }
+    return filtered;
+  },
 
+  debouncedFilterAuditLogs() {
+    clearTimeout(this.state.logsSearchDebounceTimer);
+    this.state.logsSearchDebounceTimer = setTimeout(() => {
+      this.filterAuditLogs(true);
+    }, 90);
+  },
+
+  filterAuditLogs(resetWindow = false) {
+    if (this.state.currentUser?.role !== "admin") return;
+    if (resetWindow) {
+      this.state.logsVisibleCount = this.state.logsPageSize;
+    }
+    const filtered = this.getFilteredAuditLogs();
     this.renderAuditLogsTable(filtered);
+  },
+
+  loadMoreAuditLogs() {
+    this.state.logsVisibleCount += this.state.logsPageSize;
+    this.filterAuditLogs(false);
   },
 
   renderAuditLogsTable(logs) {
     const adminTbody = document.getElementById("logsTableBody");
+    const pagWrap = document.getElementById("adminLogsPagination");
+    const summaryEl = document.getElementById("auditLogsCountSummary");
     if (!adminTbody) return;
+
+    const totalAll = (this.state.auditLogs || []).length;
+    if (summaryEl) {
+      summaryEl.textContent = logs.length === totalAll
+        ? `${totalAll.toLocaleString('en-IN')} Audit Log Records`
+        : `Showing ${logs.length.toLocaleString('en-IN')} matching logs (of ${totalAll.toLocaleString('en-IN')} total)`;
+    }
 
     if (logs.length === 0) {
       adminTbody.innerHTML = `<tr><td colspan="8" class="text-center" style="color:var(--text-muted);padding:2rem;">No audit logs match current filters.</td></tr>`;
+      if (pagWrap) pagWrap.innerHTML = "";
       return;
     }
 
-    adminTbody.innerHTML = logs.map(l => {
+    const visible = logs.slice(0, this.state.logsVisibleCount);
+    const isLogSelection = this.state.selectionMode && this.state.selectionTarget === "logs";
+    const selectedSet = new Set(isLogSelection ? (this.state.selectedLogIds || []) : []);
+
+    adminTbody.innerHTML = visible.map(l => {
       let badgeStyle = "background:var(--color-in-bg);color:var(--color-in);border:1px solid var(--color-in-border);";
       if (l.action === "OUT" || l.action === "DELETE") badgeStyle = "background:var(--color-out-bg);color:var(--color-out);border:1px solid var(--color-out-border);";
       if (l.action === "CAME_IN_AND_WENT_OUT") badgeStyle = "background:var(--color-transit-bg);color:var(--color-transit);border:1px solid var(--color-transit-border);";
@@ -1368,10 +1735,21 @@ const App = {
       const refNote = l.invoice_no ? `Ref: ${l.invoice_no}` : (l.notes || "");
       const timeStr = l.timestamp || "";
       const displayTime = timeStr ? timeStr.slice(0, 19) : "—";
+      const safeId = this.escapeHtml(l.id || "");
+      const isSelected = selectedSet.has(l.id);
+      const selectIndicator = isLogSelection
+        ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}" style="margin-right:0.45rem;vertical-align:middle;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
+        : "";
 
       return `
-        <tr>
-          <td style="font-size:0.75rem;color:var(--text-muted);white-space:nowrap;font-family:var(--font-mono);">${this.escapeHtml(displayTime)}</td>
+        <tr class="selectable-row ${isSelected ? 'selected-row' : ''}" data-log-id="${safeId}"
+          oncontextmenu="App.handleLogContextMenu(event, '${safeId}')"
+          onpointerdown="App.handleLogPointerDown(event, '${safeId}')"
+          onpointerup="App.handleItemPointerUp(event)"
+          onpointercancel="App.handleItemPointerUp(event)"
+          onpointermove="App.handleItemPointerMove(event)"
+          onclick="App.handleLogClick(event, '${safeId}')">
+          <td style="font-size:0.75rem;color:var(--text-muted);white-space:nowrap;font-family:var(--font-mono);">${selectIndicator}${this.escapeHtml(displayTime)}</td>
           <td style="font-weight:600;">${this.escapeHtml(l.employee_username)}</td>
           <td><span class="stock-badge" style="${badgeStyle}">${this.escapeHtml(l.action)}</span></td>
           <td style="font-size:0.75rem;color:var(--text-muted);">${this.escapeHtml(l.source || '')}</td>
@@ -1385,6 +1763,20 @@ const App = {
         </tr>
       `;
     }).join("");
+
+    if (pagWrap) {
+      const remaining = logs.length - visible.length;
+      if (remaining > 0) {
+        pagWrap.innerHTML = `
+          <div class="pagination-meta">Showing ${visible.length} of ${logs.length} logs</div>
+          <button class="btn-load-more" onclick="App.loadMoreAuditLogs()">Load ${Math.min(remaining, this.state.logsPageSize)} More (${remaining} left)</button>
+        `;
+      } else if (logs.length > this.state.logsPageSize) {
+        pagWrap.innerHTML = `<div class="pagination-meta">Showing all ${logs.length} logs</div>`;
+      } else {
+        pagWrap.innerHTML = "";
+      }
+    }
   },
 
   showImportHistoricalModal() {

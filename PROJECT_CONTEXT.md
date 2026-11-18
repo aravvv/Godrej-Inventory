@@ -210,3 +210,7 @@ python -c "import requests; print(requests.get('https://godrej-inventory.vercel.
 - **Branding**: Added official `interio by Godrej` SVG logo in header and login screens.
 - **Admin Password Reset**: Added modal and endpoint `PUT /api/users/{user_id}/password` enabling admins to change any user's password.
 - **Column Cleanup**: Removed `SKU` and `Dealer Price` columns from Google Sheets `Live_Inventory`.
+- **15-Char LN Code Length Validation**: Added warning prompt (`Please scan again, LN Code longer/shorter than accepted`) with `"Extract as it is"` override button when OCR scans a code with != 15 characters.
+- **Inventory Quantity Filters & Sorting**: Added 6 quantity filter pills (`All`, `In Stock >0`, `Zero Stock 0`, `Deficit <0`, `Low Stock 1–3`, `Bulk 4+`), `Min/Max` numeric quantity range inputs, sort dropdown (`Recently Updated`, `Stock Qty High→Low / Low→High`, `Product Name A→Z / Z→A`, `LN Code A→Z`), and clickable sortable table headers.
+- **Audit Log Multi-Select Deletion**: Added hold/right-click row selection in the Admin Audit Logs tab with `Select All`, confirmation modal, and `POST /api/logs/delete-batch` backed by a single-call Google Sheets `batchUpdate` (`deleteDimension`).
+- **High-Volume Performance Optimizations**: Enabled FastAPI `GZipMiddleware`, single-call `batchUpdate` row deletion with `O(N)` in-memory cache updates, pre-indexed client search strings (`_searchStr`), and windowed pagination (`Load 100 More`) on Audit Logs.

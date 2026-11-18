@@ -819,7 +819,27 @@ class GSheetsPrimaryDB:
                         ranges.append((r_idx, r_idx))
 
                 for start_row, end_row in reversed(ranges):
-                    self._retry_api(inv_ws.delete_rows, start_row, end_row)
+                    pass
+
+                # Execute all row deletions in a single batchUpdate API call for maximum speed
+                try:
+                    delete_requests = [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": inv_ws.id,
+                                    "dimension": "ROWS",
+                                    "startIndex": start_row - 1,
+                                    "endIndex": end_row
+                                }
+                            }
+                        }
+                        for start_row, end_row in reversed(ranges)
+                    ]
+                    self._retry_api(self.sheet.batch_update, {"requests": delete_requests})
+                except Exception:
+                    for start_row, end_row in reversed(ranges):
+                        self._retry_api(inv_ws.delete_rows, start_row, end_row)
 
                 now_str = get_ist_now_str()
                 actor = (employee_username or "admin").strip()
@@ -854,8 +874,27 @@ class GSheetsPrimaryDB:
                 if audit_rows:
                     self._retry_api(log_ws.append_rows, audit_rows)
 
-                # Refresh inventory cache so row indices of remaining rows stay accurate
-                self.get_inventory_list(force_refresh=True)
+                # O(N) in-memory cache update without a redundant network round-trip
+                deleted_lns_set = {t["ln_code"] for t in targets}
+                deleted_row_indices = sorted(t["_row_idx"] for t in targets)
+                remaining_items = []
+                new_by_ln = {}
+                for it in self._cache["inventory"]["data"]:
+                    if it["ln_code"] in deleted_lns_set:
+                        continue
+                    old_r = it.get("_row_idx", 0)
+                    shift = sum(1 for dr in deleted_row_indices if dr < old_r)
+                    updated_it = dict(it)
+                    updated_it["_row_idx"] = old_r - shift
+                    remaining_items.append(updated_it)
+                    new_by_ln[updated_it["ln_code"]] = updated_it
+
+                self._cache["inventory"] = {
+                    "data": remaining_items,
+                    "by_ln": new_by_ln,
+                    "ts": time.time(),
+                    "synced_at": now_str
+                }
                 self._invalidate_cache("audit_logs")
 
                 if len(deleted_summary) == 1:
@@ -873,7 +912,7 @@ class GSheetsPrimaryDB:
         return ok, msg, (deleted_list[0] if deleted_list else None)
 
     # ----------------- AUDIT LOGS -----------------
-    def get_audit_logs(self, limit: int = 200, action: str = None, employee: str = None, force_refresh: bool = False) -> list:
+    def get_audit_logs(self, limit: int = 5000, action: str = None, employee: str = None, force_refresh: bool = False) -> list:
         with self._lock:
             now = time.time()
             cached = self._cache["audit_logs"]
@@ -881,13 +920,14 @@ class GSheetsPrimaryDB:
                 ws = self._get_ws("Audit_Log")
                 raw = self._retry_api(ws.get_all_values)
                 logs = []
-                for idx, r in enumerate(raw[1:], start=1):
+                for row_num, r in enumerate(raw[1:], start=2):
                     if not r or len(r) < 6:
                         continue
                     def c(i, d=""):
                         return str(r[i]).strip() if i < len(r) and r[i] is not None else d
+                    log_id = c(0) or f"ROW-{row_num}"
                     logs.append({
-                        "id": c(0) or str(idx),
+                        "id": log_id,
                         "timestamp": c(1),
                         "employee_username": c(2),
                         "action": c(3),
@@ -898,7 +938,8 @@ class GSheetsPrimaryDB:
                         "stock_before": _to_int(c(8, "0"), 0),
                         "stock_after": _to_int(c(9, "0"), 0),
                         "invoice_no": c(10),
-                        "notes": c(11)
+                        "notes": c(11),
+                        "_row_idx": row_num
                     })
                 # Reverse chronological order
                 logs.reverse()
@@ -911,6 +952,104 @@ class GSheetsPrimaryDB:
                 emp_low = employee.strip().lower()
                 result = [l for l in result if (l["employee_username"] or "").lower() == emp_low]
             return result[:limit]
+
+    def delete_audit_logs_batch(self, log_ids: list, employee_username: str = "admin") -> tuple[bool, str, list]:
+        """
+        Permanently deletes one or more audit log rows from Audit_Log in Google Sheets
+        using a single batchUpdate DeleteDimension call from bottom to top.
+        """
+        cleaned_ids = []
+        seen = set()
+        for raw_id in (log_ids or []):
+            lid = str(raw_id or "").strip()
+            if lid and lid not in seen:
+                seen.add(lid)
+                cleaned_ids.append(lid)
+
+        if not cleaned_ids:
+            return False, "No audit logs selected for deletion", []
+
+        target_id_set = set(cleaned_ids)
+
+        with self._lock:
+            try:
+                log_ws = self._get_ws("Audit_Log")
+
+                # Force-refresh to guarantee exact 1-based _row_idx before deleting rows
+                self.get_audit_logs(limit=100000, force_refresh=True)
+                all_logs = self._cache["audit_logs"]["data"]
+
+                targets = [l for l in all_logs if l.get("id") in target_id_set and l.get("_row_idx")]
+                if not targets:
+                    return False, "Selected audit log entries were not found in Google Sheet", []
+
+                # Sort ascending by _row_idx to merge contiguous ranges
+                targets.sort(key=lambda x: x["_row_idx"])
+                ranges = []
+                for t in targets:
+                    r_idx = t["_row_idx"]
+                    if ranges and r_idx == ranges[-1][1] + 1:
+                        ranges[-1] = (ranges[-1][0], r_idx)
+                    else:
+                        ranges.append((r_idx, r_idx))
+
+                # Delete ranges from bottom to top in a single batch_update call
+                try:
+                    delete_requests = [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": log_ws.id,
+                                    "dimension": "ROWS",
+                                    "startIndex": start_row - 1,
+                                    "endIndex": end_row
+                                }
+                            }
+                        }
+                        for start_row, end_row in reversed(ranges)
+                    ]
+                    self._retry_api(self.sheet.batch_update, {"requests": delete_requests})
+                except Exception:
+                    for start_row, end_row in reversed(ranges):
+                        self._retry_api(log_ws.delete_rows, start_row, end_row)
+
+                deleted_row_set = {t["_row_idx"] for t in targets}
+                deleted_row_indices = sorted(deleted_row_set)
+                remaining_logs = []
+                for l in all_logs:
+                    old_r = l.get("_row_idx", 0)
+                    if old_r in deleted_row_set:
+                        continue
+                    shift = sum(1 for dr in deleted_row_indices if dr < old_r)
+                    updated_l = dict(l)
+                    updated_l["_row_idx"] = old_r - shift
+                    remaining_logs.append(updated_l)
+
+                self._cache["audit_logs"] = {
+                    "data": remaining_logs,
+                    "ts": time.time()
+                }
+
+                deleted_summary = [
+                    {
+                        "id": t["id"],
+                        "ln_code": t.get("ln_code", ""),
+                        "description": t.get("description", ""),
+                        "action": t.get("action", ""),
+                        "timestamp": t.get("timestamp", "")
+                    }
+                    for t in targets
+                ]
+
+                if len(deleted_summary) == 1:
+                    d0 = deleted_summary[0]
+                    msg = f"Deleted audit log {d0['id']} ({d0['action']} {d0['ln_code']}) from Google Sheet"
+                else:
+                    msg = f"Deleted {len(deleted_summary)} audit log records from Google Sheet"
+
+                return True, msg, deleted_summary
+            except Exception as e:
+                return False, f"Google Sheets audit log delete error: {str(e)}", []
 
     def reconcile_and_reorganize_ledger(self, employee_username: str = "admin") -> tuple[bool, str, dict]:
         """

@@ -9,6 +9,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 from gsheets_db import gsheets_db
@@ -17,6 +18,7 @@ from vision import parse_slip_image, parse_bill_image
 
 app = FastAPI(title="Godrej Inventory Automation System")
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,6 +90,12 @@ class RestoreRequest(BaseModel):
 class DeleteInventoryBatchRequest(BaseModel):
     ln_codes: List[str]
     username: Optional[str] = "admin"
+
+
+class DeleteAuditLogsBatchRequest(BaseModel):
+    log_ids: List[str]
+    username: Optional[str] = "admin"
+    role: Optional[str] = "admin"
 
 
 class HistoricalImportItem(BaseModel):
@@ -272,13 +280,29 @@ def delete_inventory_item(ln_code: str, username: str = Query("admin")):
 
 
 @app.get("/api/logs")
-def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[str] = None, refresh: int = Query(0), role: str = Query("")):
+def get_logs(limit: int = 5000, action: Optional[str] = None, employee: Optional[str] = None, refresh: int = Query(0), role: str = Query("")):
     if (role or "").strip().lower() != "admin":
         raise HTTPException(status_code=403, detail="Audit logs are strictly restricted to admin users.")
     return {
         "logs": gsheets_db.get_audit_logs(
             limit=limit, action=action, employee=employee, force_refresh=bool(refresh)
         )
+    }
+
+
+@app.post("/api/logs/delete-batch")
+def delete_audit_logs_batch(req: DeleteAuditLogsBatchRequest, role: str = Query("admin")):
+    effective_role = (req.role or role or "").strip().lower()
+    if effective_role != "admin":
+        raise HTTPException(status_code=403, detail="Only admin users can delete audit logs.")
+    ok, msg, deleted = gsheets_db.delete_audit_logs_batch(req.log_ids, employee_username=req.username or "admin")
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {
+        "success": True,
+        "message": msg,
+        "deleted": deleted,
+        "deleted_count": len(deleted)
     }
 
 

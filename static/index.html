@@ -219,7 +219,30 @@
             <div class="filter-pills-row">
               <button id="empFilterAll" class="filter-pill active" onclick="App.setInventoryFilter('all', this)">All Items</button>
               <button id="empFilterInStock" class="filter-pill" onclick="App.setInventoryFilter('in_stock', this)">In Stock (&gt;0)</button>
-              <button id="empFilterOutStock" class="filter-pill" onclick="App.setInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+              <button id="empFilterZeroStock" class="filter-pill" onclick="App.setInventoryFilter('zero_stock', this)">Zero Stock (0)</button>
+              <button id="empFilterDeficit" class="filter-pill" onclick="App.setInventoryFilter('deficit', this)">Deficit (&lt;0)</button>
+              <button id="empFilterLowStock" class="filter-pill" onclick="App.setInventoryFilter('low_stock', this)">Low Stock (1–3)</button>
+              <button id="empFilterHighStock" class="filter-pill" onclick="App.setInventoryFilter('high_stock', this)">Bulk Stock (4+)</button>
+            </div>
+            <div class="inventory-controls-bar">
+              <div class="qty-range-group">
+                <span class="ctrl-label">Qty Filter:</span>
+                <input type="number" id="empMinQtyInput" class="qty-range-input" placeholder="Min" oninput="App.filterEmpInventory()">
+                <span class="ctrl-sep">to</span>
+                <input type="number" id="empMaxQtyInput" class="qty-range-input" placeholder="Max" oninput="App.filterEmpInventory()">
+                <button type="button" id="empClearQtyBtn" class="btn-clear-qty hidden" onclick="App.clearEmpQtyRange()" title="Clear quantity filter">&times;</button>
+              </div>
+              <div class="sort-control-group">
+                <span class="ctrl-label">Sort By:</span>
+                <select id="empSortSelect" class="sort-select" onchange="App.setEmpSort(this.value)">
+                  <option value="recent_desc">Recently Updated</option>
+                  <option value="qty_desc">Stock Qty: High &rarr; Low (Desc)</option>
+                  <option value="qty_asc">Stock Qty: Low &rarr; High (Asc)</option>
+                  <option value="name_asc">Product Name: A &rarr; Z (Asc)</option>
+                  <option value="name_desc">Product Name: Z &rarr; A (Desc)</option>
+                  <option value="ln_asc">LN Code: A &rarr; Z</option>
+                </select>
+              </div>
               <span class="selection-hint-text">Hold or right-click a product to select &amp; delete</span>
             </div>
           </div>
@@ -348,23 +371,46 @@
               </a>
             </div>
           </div>
-          <div class="filter-pills-row" style="margin-bottom:0.85rem;">
+          <div class="filter-pills-row">
             <button id="adminFilterAll" class="filter-pill active" onclick="App.setAdminInventoryFilter('all', this)">All Items</button>
             <button id="adminFilterInStock" class="filter-pill" onclick="App.setAdminInventoryFilter('in_stock', this)">In Stock (&gt;0)</button>
-            <button id="adminFilterOutStock" class="filter-pill" onclick="App.setAdminInventoryFilter('out_of_stock', this)">Out of Stock (0)</button>
+            <button id="adminFilterZeroStock" class="filter-pill" onclick="App.setAdminInventoryFilter('zero_stock', this)">Zero Stock (0)</button>
+            <button id="adminFilterDeficit" class="filter-pill" onclick="App.setAdminInventoryFilter('deficit', this)">Deficit (&lt;0)</button>
+            <button id="adminFilterLowStock" class="filter-pill" onclick="App.setAdminInventoryFilter('low_stock', this)">Low Stock (1–3)</button>
+            <button id="adminFilterHighStock" class="filter-pill" onclick="App.setAdminInventoryFilter('high_stock', this)">Bulk Stock (4+)</button>
+          </div>
+          <div class="inventory-controls-bar" style="margin-bottom:0.85rem;">
+            <div class="qty-range-group">
+              <span class="ctrl-label">Qty Filter:</span>
+              <input type="number" id="adminMinQtyInput" class="qty-range-input" placeholder="Min" oninput="App.filterInventory()">
+              <span class="ctrl-sep">to</span>
+              <input type="number" id="adminMaxQtyInput" class="qty-range-input" placeholder="Max" oninput="App.filterInventory()">
+              <button type="button" id="adminClearQtyBtn" class="btn-clear-qty hidden" onclick="App.clearAdminQtyRange()" title="Clear quantity filter">&times;</button>
+            </div>
+            <div class="sort-control-group">
+              <span class="ctrl-label">Sort By:</span>
+              <select id="adminSortSelect" class="sort-select" onchange="App.setAdminSort(this.value)">
+                <option value="recent_desc">Recently Updated</option>
+                <option value="qty_desc">Stock Qty: High &rarr; Low (Desc)</option>
+                <option value="qty_asc">Stock Qty: Low &rarr; High (Asc)</option>
+                <option value="name_asc">Product Name: A &rarr; Z (Asc)</option>
+                <option value="name_desc">Product Name: Z &rarr; A (Desc)</option>
+                <option value="ln_asc">LN Code: A &rarr; Z</option>
+              </select>
+            </div>
             <span class="selection-hint-text">Hold or right-click a row to select &amp; delete</span>
           </div>
           <div class="table-responsive">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>LN Code</th>
-                  <th>Product Description</th>
-                  <th>Stock</th>
+                  <th class="sortable-th" onclick="App.toggleAdminTableSort('ln')">LN Code <span id="sortInd_ln" class="sort-ind"></span></th>
+                  <th class="sortable-th" onclick="App.toggleAdminTableSort('name')">Product Description <span id="sortInd_name" class="sort-ind"></span></th>
+                  <th class="sortable-th" onclick="App.toggleAdminTableSort('qty')">Stock <span id="sortInd_qty" class="sort-ind"></span></th>
                   <th>Category</th>
                   <th>Dealer Price</th>
                   <th>Consumer Price</th>
-                  <th>Last Modified</th>
+                  <th class="sortable-th" onclick="App.toggleAdminTableSort('recent')">Last Modified <span id="sortInd_recent" class="sort-ind">↓</span></th>
                 </tr>
               </thead>
               <tbody id="inventoryTableBody">
@@ -378,7 +424,7 @@
         <!-- Admin Tab 2: Audit Logs -->
         <div id="logsTab" class="admin-content">
           <div class="inventory-toolbar" style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
-            <select id="logActionFilter" onchange="App.loadAuditLogs()" style="max-width:200px; font-size:0.85rem;">
+            <select id="logActionFilter" onchange="App.filterAuditLogs(true)" style="max-width:200px; font-size:0.85rem;">
               <option value="">All Actions (IN, OUT, TRANSIT, DELETE)</option>
               <option value="IN">IN</option>
               <option value="OUT">OUT</option>
@@ -387,7 +433,7 @@
             </select>
             <div class="search-input-wrapper" style="flex:1; min-width:200px;">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-              <input type="text" id="logSearchInput" class="glass-input search-input" placeholder="Search by LN code, description, employee, or ref..." oninput="App.filterAuditLogs()">
+              <input type="text" id="logSearchInput" class="glass-input search-input" placeholder="Search by LN code, description, employee, or ref..." oninput="App.debouncedFilterAuditLogs()">
             </div>
             <button class="btn btn-secondary btn-sm" onclick="App.reconcileLedger(this)" title="Re-sort chronologically, resolve names to LN codes, and recalculate running stock across the entire sheet">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg>
@@ -401,6 +447,10 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
               <span>Refresh</span>
             </button>
+          </div>
+          <div class="filter-pills-row" style="margin-bottom:0.75rem; justify-content:space-between;">
+            <span id="auditLogsCountSummary" style="font-size:0.78rem; color:var(--text-secondary); font-weight:600;">Loading audit logs...</span>
+            <span class="selection-hint-text">Hold or right-click a log row to select &amp; delete</span>
           </div>
           <div class="table-responsive">
             <table class="data-table">
@@ -421,6 +471,7 @@
               </tbody>
             </table>
           </div>
+          <div id="adminLogsPagination" class="pagination-wrap"></div>
         </div>
 
         <!-- Admin Tab 3: Employees -->
@@ -571,7 +622,7 @@
             Are you sure you want to permanently delete the selected product(s) from <strong>Live_Inventory</strong> in Google Sheets?
           </p>
           <div id="deleteModalItemsList" class="delete-modal-items-list"></div>
-          <p style="font-size:0.76rem;color:var(--text-muted);margin-top:0.75rem;">
+          <p id="deleteModalNoteText" style="font-size:0.76rem;color:var(--text-muted);margin-top:0.75rem;">
             This action removes the selected row(s) directly from the Google Sheet and logs a <code>DELETE</code> record in <strong>Audit_Log</strong>.
           </p>
         </div>
