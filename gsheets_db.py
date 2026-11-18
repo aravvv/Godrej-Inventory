@@ -651,11 +651,12 @@ class GSheetsPrimaryDB:
                     if action == "IN":
                         stock_after = stock_before + qty
                     elif action == "OUT":
-                        stock_after = max(0, stock_before - qty)
+                        stock_after = stock_before - qty
                     else:  # CAME_IN_AND_WENT_OUT
                         stock_after = stock_before
 
-                    desc = (item.get("description") or (existing["description"] if existing else "Unknown Product")).strip()
+                    cat_entry = catalog.lookup(ln) if ln else None
+                    desc = (item.get("description") or (existing["description"] if existing else "") or (cat_entry.get("description") if cat_entry else "") or "Unknown Product").strip()
 
                     if existing and existing.get("_row_idx"):
                         row_num = existing["_row_idx"]
@@ -910,6 +911,257 @@ class GSheetsPrimaryDB:
                 emp_low = employee.strip().lower()
                 result = [l for l in result if (l["employee_username"] or "").lower() == emp_low]
             return result[:limit]
+
+    def reconcile_and_reorganize_ledger(self, employee_username: str = "admin") -> tuple[bool, str, dict]:
+        """
+        Reconciles the entire historical ledger across Audit_Log and Live_Inventory:
+        1. Reads all transactions from Audit_Log.
+        2. Resolves any missing/unknown LN codes from descriptions via Catalog fuzzy match.
+        3. Sorts all transactions in strict chronological order by Timestamp.
+        4. Replays running stock from row 1 to the end:
+           - Recalculates stock_before and stock_after for every transaction.
+           - IN: +qty
+           - OUT: -qty (no clamping, allows negative deficits)
+           - CAME_IN_AND_WENT_OUT: unchanged (0 -> 0)
+        5. Updates Audit_Log in Google Sheets with the sorted, calculated rows.
+        6. Rebuilds Live_Inventory in Google Sheets with the final net stock for all active items,
+           populating descriptions, categories, and consumer prices from the catalog.
+        7. Invalidates cache.
+        """
+        with self._lock:
+            try:
+                log_ws = self._get_ws("Audit_Log")
+                inv_ws = self._get_ws("Live_Inventory")
+
+                raw_logs = self._retry_api(log_ws.get_all_values)
+                if len(raw_logs) <= 1:
+                    return False, "Audit_Log has no transaction rows to reconcile.", {}
+
+                headers = raw_logs[0]
+                rows = raw_logs[1:]
+
+                parsed_records = []
+                for idx, r in enumerate(rows):
+                    if not r or len(r) < 6:
+                        continue
+                    def c(i, d=""):
+                        return str(r[i]).strip() if i < len(r) and r[i] is not None else d
+
+                    log_id = c(0) or f"LOG-{idx+1}"
+                    ts_str = c(1) or get_ist_now_str()
+                    emp = c(2) or "system"
+                    action = c(3).upper() or "IN"
+                    src = c(4) or "MANUAL"
+                    ln = c(5).upper()
+                    desc = c(6)
+                    qty = _to_int(c(7, "1"), 1)
+                    inv_no = c(10)
+                    notes = c(11)
+
+                    # If LN code is missing or placeholder, attempt fuzzy match from description
+                    if (not ln or ln in ("UNKNOWN", "NONE", "XXXXX", "NULL")) and desc:
+                        match = catalog.match_name(desc)
+                        if match:
+                            ln = match["item"]["ln_code"]
+                            if not desc or desc == "Unknown Product":
+                                desc = match["item"]["description"]
+
+                    # If description is missing or generic, lookup from catalog
+                    if ln and (not desc or desc == "Unknown Product"):
+                        cat_item = catalog.lookup(ln)
+                        if cat_item:
+                            desc = cat_item["description"]
+
+                    parsed_records.append({
+                        "id": log_id,
+                        "timestamp": ts_str,
+                        "employee": emp,
+                        "action": action,
+                        "source": src,
+                        "ln_code": ln,
+                        "description": desc or "Godrej Item",
+                        "quantity": qty,
+                        "invoice_no": inv_no,
+                        "notes": notes
+                    })
+
+                # Sort chronologically by timestamp
+                def parse_sort_key(rec):
+                    ts = rec["timestamp"]
+                    cleaned_ts = re.sub(r"[^\d]", "", ts)
+                    return cleaned_ts.ljust(14, "0")
+
+                parsed_records.sort(key=parse_sort_key)
+
+                # Replay running stock across all SKUs
+                from collections import defaultdict
+                running_stock = defaultdict(int)
+                last_activity = {}
+
+                reconciled_audit_rows = []
+                for rec in parsed_records:
+                    ln = rec["ln_code"]
+                    qty = rec["quantity"]
+                    action = rec["action"]
+                    sb = running_stock[ln]
+
+                    if action == "IN":
+                        sa = sb + qty
+                    elif action == "OUT":
+                        sa = sb - qty
+                    else:  # CAME_IN_AND_WENT_OUT or other pass-through
+                        sa = sb
+
+                    running_stock[ln] = sa
+                    last_activity[ln] = {
+                        "timestamp": rec["timestamp"],
+                        "employee": rec["employee"],
+                        "description": rec["description"]
+                    }
+
+                    reconciled_audit_rows.append([
+                        rec["id"],
+                        rec["timestamp"],
+                        rec["employee"],
+                        rec["action"],
+                        rec["source"],
+                        rec["ln_code"],
+                        rec["description"],
+                        rec["quantity"],
+                        sb,
+                        sa,
+                        rec["invoice_no"],
+                        rec["notes"]
+                    ])
+
+                # 1. Update Audit_Log tab with sorted, reconciled ledger
+                self._retry_api(log_ws.clear)
+                self._retry_api(log_ws.update, [AUDIT_HEADERS] + reconciled_audit_rows, "A1")
+
+                # 2. Rebuild Live_Inventory tab from reconciled running stock
+                new_inventory_rows = []
+                for ln, current_qty in running_stock.items():
+                    if not ln:
+                        continue
+                    cat_item = catalog.lookup(ln)
+                    desc = (cat_item.get("description") if cat_item else None) or last_activity.get(ln, {}).get("description") or "Godrej Item"
+                    cat = cat_item.get("category", "") if cat_item else ""
+                    sub_cat = cat_item.get("sub_cat", "") if cat_item else ""
+                    cp = cat_item.get("consumer_price", 0.0) if cat_item else 0.0
+                    last_ts = last_activity.get(ln, {}).get("timestamp", get_ist_now_str())
+                    last_emp = last_activity.get(ln, {}).get("employee", employee_username)
+
+                    new_inventory_rows.append([
+                        ln, desc, cat, sub_cat, current_qty, cp, last_ts, last_emp
+                    ])
+
+                # Sort inventory items: positive stock first, then deficit items, by newest updated
+                new_inventory_rows.sort(key=lambda r: (r[4] > 0, r[6]), reverse=True)
+
+                self._retry_api(inv_ws.clear)
+                self._retry_api(inv_ws.update, [INVENTORY_HEADERS] + new_inventory_rows, "A1")
+
+                self._invalidate_cache()
+
+                summary = {
+                    "total_transactions": len(reconciled_audit_rows),
+                    "total_skus": len(new_inventory_rows),
+                    "in_stock_skus": sum(1 for r in new_inventory_rows if r[4] > 0),
+                    "deficit_skus": sum(1 for r in new_inventory_rows if r[4] < 0),
+                    "zero_stock_skus": sum(1 for r in new_inventory_rows if r[4] == 0)
+                }
+
+                return True, f"Ledger reconciled: {summary['total_transactions']} transactions organized across {summary['total_skus']} SKUs.", summary
+
+            except Exception as e:
+                return False, f"Reconciliation failed: {str(e)}", {}
+
+    def import_historical_batch(self, items: list, employee_username: str = "admin") -> tuple[bool, str, dict]:
+        """
+        Imports historical records with or without LN codes:
+        Resolves product descriptions to Godrej catalog LN codes, writes to Audit_Log,
+        and re-organizes and reconciles the entire ledger.
+        """
+        if not items:
+            return False, "No items provided for historical import.", {}
+
+        with self._lock:
+            try:
+                log_ws = self._get_ws("Audit_Log")
+                now_str = get_ist_now_str()
+                base_ts = int(time.time() * 1000)
+
+                new_rows = []
+                mapped_details = []
+
+                for idx, it in enumerate(items):
+                    raw_name = (it.get("product_name") or it.get("description") or "").strip()
+                    code = (it.get("ln_code") or "").strip().upper()
+                    action = (it.get("action") or "IN").strip().upper()
+                    if action not in ("IN", "OUT", "CAME_IN_AND_WENT_OUT"):
+                        action = "IN"
+                    qty = _to_int(it.get("quantity", 1), 1)
+                    if qty <= 0:
+                        qty = 1
+
+                    ts = (it.get("timestamp") or it.get("date") or now_str).strip()
+                    if len(ts) == 10:  # e.g. YYYY-MM-DD
+                        ts = f"{ts} 12:00:00"
+
+                    ref = (it.get("reference") or it.get("invoice_no") or "HISTORICAL_IMPORT").strip()
+                    notes = (it.get("notes") or "Imported historical record").strip()
+
+                    # Match LN code from name if missing
+                    cat_item = None
+                    if code:
+                        cat_item = catalog.lookup(code)
+                    if not cat_item and raw_name:
+                        match = catalog.match_name(raw_name)
+                        if match:
+                            cat_item = match["item"]
+                            code = cat_item["ln_code"]
+
+                    desc = (cat_item.get("description") if cat_item else raw_name) or "Godrej Item"
+                    final_code = code or "UNKNOWN"
+
+                    new_rows.append([
+                        f"LOG-HIST-{base_ts + idx}",
+                        ts,
+                        employee_username or "admin",
+                        action,
+                        "HISTORICAL_IMPORT",
+                        final_code,
+                        desc,
+                        qty,
+                        0,  # Temporary; reconcile will compute exact chronological stock_before
+                        0,  # Temporary; reconcile will compute exact chronological stock_after
+                        ref,
+                        notes
+                    ])
+
+                    mapped_details.append({
+                        "raw_name": raw_name,
+                        "ln_code": final_code,
+                        "description": desc,
+                        "action": action,
+                        "quantity": qty,
+                        "timestamp": ts,
+                        "matched": bool(cat_item)
+                    })
+
+                # Append raw rows to Audit_Log
+                self._retry_api(log_ws.append_rows, new_rows)
+
+                # Reconcile, re-sort chronologically, and cascade stock
+                ok, msg, summary = self.reconcile_and_reorganize_ledger(employee_username=employee_username)
+                if not ok:
+                    return False, f"Rows imported but reconciliation failed: {msg}", {"mapped": mapped_details}
+
+                summary["mapped_items"] = mapped_details
+                return True, f"Successfully imported and organized {len(new_rows)} historical items! {msg}", summary
+
+            except Exception as e:
+                return False, f"Historical import failed: {str(e)}", {}
 
     # ----------------- BACKUPS & RECOVERY -----------------
     def maybe_run_daily_backup(self):

@@ -173,7 +173,7 @@ def process_stock_batch(employee_username, action, source, items, invoice_no=Non
             if action == "IN":
                 stock_after = stock_before + qty
             elif action == "OUT":
-                stock_after = max(0, stock_before - qty)
+                stock_after = stock_before - qty
             elif action == "CAME_IN_AND_WENT_OUT":
                 stock_after = stock_before # net zero
 

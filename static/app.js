@@ -746,7 +746,7 @@ const App = {
       const isSelected = selectedSet.has(it.ln_code);
       const stockBadge = isPositive
         ? `<span class="stock-badge in-stock">${stock} in stock</span>`
-        : `<span class="stock-badge out-stock">0 stock</span>`;
+        : `<span class="stock-badge out-stock">${stock} stock</span>`;
 
       const selectIndicator = this.state.selectionMode
         ? `<span class="select-check-circle ${isSelected ? 'checked' : ''}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg></span>`
@@ -1172,11 +1172,12 @@ const App = {
       listEl.innerHTML = items.map(it => {
         const st = Number(it.current_stock || 0);
         const badgeCls = st > 0 ? "stock-badge in-stock" : "stock-badge out-stock";
+        const badgeTxt = st > 0 ? `${st} in stock` : `${st} stock`;
         return `
           <div class="delete-stock-item-box">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
               <span class="emp-inv-code">${this.escapeHtml(it.ln_code)}</span>
-              <span class="${badgeCls}">${st} in stock</span>
+              <span class="${badgeCls}">${badgeTxt}</span>
             </div>
             <div style="font-weight:600;font-size:0.86rem;margin-top:0.3rem;color:var(--text-main);">${this.escapeHtml(it.description || 'Godrej Item')}</div>
           </div>
@@ -1321,6 +1322,174 @@ const App = {
         </tr>
       `;
     }).join("");
+  },
+
+  showImportHistoricalModal() {
+    document.getElementById("historicalInputText").value = "";
+    const container = document.getElementById("historicalPreviewContainer");
+    if (container) {
+      container.classList.add("hidden");
+      container.innerHTML = "";
+    }
+    document.getElementById("importHistoricalModal").classList.remove("hidden");
+  },
+
+  hideImportHistoricalModal() {
+    document.getElementById("importHistoricalModal").classList.add("hidden");
+  },
+
+  parseHistoricalLines() {
+    const text = (document.getElementById("historicalInputText")?.value || "").trim();
+    if (!text) return [];
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    const parsed = [];
+    for (const line of lines) {
+      const parts = line.split(/[,\t;]/).map(p => p.trim());
+      if (parts.length === 0 || !parts[0]) continue;
+      const name = parts[0];
+      const qty = parts.length > 1 && !isNaN(parseInt(parts[1])) ? parseInt(parts[1]) : 1;
+      let action = "IN";
+      if (parts.length > 2) {
+        const a = parts[2].toUpperCase();
+        if (a.includes("OUT") && !a.includes("IN")) action = "OUT";
+        else if (a.includes("TRANSIT") || (a.includes("IN") && a.includes("OUT"))) action = "CAME_IN_AND_WENT_OUT";
+        else action = "IN";
+      }
+      const ts = parts.length > 3 ? parts[3] : "";
+      parsed.push({
+        product_name: name,
+        quantity: qty,
+        action: action,
+        timestamp: ts
+      });
+    }
+    return parsed;
+  },
+
+  async previewHistoricalMapping() {
+    const parsed = this.parseHistoricalLines();
+    if (parsed.length === 0) {
+      this.showToast("Please enter at least one historical record", "error");
+      return;
+    }
+    const container = document.getElementById("historicalPreviewContainer");
+    if (!container) return;
+    container.classList.remove("hidden");
+    container.innerHTML = `<div class="text-center" style="padding:1rem;">${this.inlineLoaderHtml("Matching product names against 9,458 Godrej catalog items...")}</div>`;
+
+    try {
+      const names = parsed.map(p => p.product_name);
+      const res = await fetch("/api/admin/match-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names })
+      });
+      const data = await res.json();
+      const results = data.results || [];
+
+      const matchedCount = results.filter(r => r.matched).length;
+      container.innerHTML = `
+        <div style="font-weight:700;font-size:0.8rem;margin-bottom:0.5rem;color:var(--text-main);">
+          Catalog Match Preview (${matchedCount} / ${results.length} matched):
+        </div>
+        <div style="display:flex;flex-direction:column;gap:0.4rem;">
+          ${results.map((r, i) => {
+            const p = parsed[i] || {};
+            const badge = r.matched
+              ? `<span class="stock-badge in-stock" style="font-size:0.7rem;">${Math.round(r.score * 100)}% Match: ${this.escapeHtml(r.ln_code)}</span>`
+              : `<span class="stock-badge out-stock" style="font-size:0.7rem;">No Match</span>`;
+            return `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:0.4rem;background:var(--bg-surface);border-radius:6px;font-size:0.78rem;">
+                <div>
+                  <div style="font-weight:600;">${this.escapeHtml(r.input_name)} &rarr; <span style="color:var(--accent-color);">${r.matched ? this.escapeHtml(r.description) : 'Unknown SKU'}</span></div>
+                  <div style="color:var(--text-muted);font-size:0.72rem;">Action: ${p.action} • Qty: ${p.quantity} ${p.timestamp ? '• Date: ' + this.escapeHtml(p.timestamp) : ''}</div>
+                </div>
+                <div>${badge}</div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    } catch (e) {
+      container.innerHTML = `<p style="color:var(--color-out);padding:0.5rem;">Failed to preview catalog matches</p>`;
+    }
+  },
+
+  async submitHistoricalImport() {
+    const parsed = this.parseHistoricalLines();
+    if (parsed.length === 0) {
+      this.showToast("Please enter historical data to import", "error");
+      return;
+    }
+
+    const btn = document.getElementById("submitHistoricalImportBtn");
+    const origHtml = btn ? btn.innerHTML : "";
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `<span>Importing & Reconciling...</span>`;
+    }
+
+    try {
+      const res = await fetch("/api/admin/import-historical?role=admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: parsed,
+          username: this.state.currentUser?.username || "admin"
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        this.playSuccessSound();
+        this.showToast(data.message || "Historical records imported and ledger reorganized!", "success");
+        this.hideImportHistoricalModal();
+        await this.loadInventory(true);
+        await this.loadAuditLogs(true);
+      } else {
+        this.showToast(data.detail || data.message || "Historical import failed", "error");
+      }
+    } catch (e) {
+      this.showToast("Network error importing historical data", "error");
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+      }
+    }
+  },
+
+  async reconcileLedger(btnEl) {
+    if (!confirm("Reconcile and reorganize the entire sheet ledger?\n\nThis will:\n1. Re-sort all Audit_Log rows chronologically by timestamp.\n2. Replay and recalculate exact Stock Before & Stock After for all transactions.\n3. Update Live_Inventory with true current stock and resolve deficits from past arrivals.\n4. Populate missing product details from the 9,458 Godrej catalog.")) {
+      return;
+    }
+
+    const origHtml = btnEl ? btnEl.innerHTML : "";
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.innerHTML = `<span>Reconciling...</span>`;
+    }
+
+    try {
+      const res = await fetch("/api/admin/reconcile-ledger?role=admin", {
+        method: "POST"
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        this.playSuccessSound();
+        this.showToast(data.message || "Ledger successfully reconciled and reorganized!", "success");
+        await this.loadInventory(true);
+        await this.loadAuditLogs(true);
+      } else {
+        this.showToast(data.detail || data.message || "Reconciliation failed", "error");
+      }
+    } catch (e) {
+      this.showToast("Network error during reconciliation", "error");
+    } finally {
+      if (btnEl) {
+        btnEl.disabled = false;
+        btnEl.innerHTML = origHtml;
+      }
+    }
   },
 
   async loadUsers(forceRefresh = false) {

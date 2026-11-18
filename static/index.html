@@ -378,20 +378,28 @@
         <!-- Admin Tab 2: Audit Logs -->
         <div id="logsTab" class="admin-content">
           <div class="inventory-toolbar" style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
-            <select id="logActionFilter" onchange="App.loadAuditLogs()" style="max-width:220px; font-size:0.85rem;">
+            <select id="logActionFilter" onchange="App.loadAuditLogs()" style="max-width:200px; font-size:0.85rem;">
               <option value="">All Actions (IN, OUT, TRANSIT, DELETE)</option>
               <option value="IN">IN</option>
               <option value="OUT">OUT</option>
               <option value="CAME_IN_AND_WENT_OUT">CAME IN &amp; WENT OUT</option>
               <option value="DELETE">DELETE</option>
             </select>
-            <div class="search-input-wrapper" style="flex:1; min-width:240px;">
+            <div class="search-input-wrapper" style="flex:1; min-width:200px;">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
               <input type="text" id="logSearchInput" class="glass-input search-input" placeholder="Search by LN code, description, employee, or ref..." oninput="App.filterAuditLogs()">
             </div>
+            <button class="btn btn-secondary btn-sm" onclick="App.reconcileLedger(this)" title="Re-sort chronologically, resolve names to LN codes, and recalculate running stock across the entire sheet">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"></path><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M3 22v-6h6"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path></svg>
+              <span>Reconcile Ledger</span>
+            </button>
+            <button class="btn btn-primary btn-sm" onclick="App.showImportHistoricalModal()" title="Import past transactions with product names or codes and auto-map to catalog">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span>Import History</span>
+            </button>
             <button class="btn btn-secondary btn-sm" onclick="App.loadAuditLogs(true)" title="Fetch newest logs directly from Google Sheets">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-              <span>Refresh Logs</span>
+              <span>Refresh</span>
             </button>
           </div>
           <div class="table-responsive">
@@ -603,6 +611,44 @@
             <button type="submit" id="changePwdSubmitBtn" class="btn btn-primary">Update Password</button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- Modal: Import Historical Stock Data (Admin) -->
+    <div id="importHistoricalModal" class="modal hidden">
+      <div class="modal-card" style="max-width: 680px;">
+        <div class="modal-header">
+          <h3>Import Past Historical Transactions</h3>
+          <button class="btn-close" onclick="App.hideImportHistoricalModal()">&times;</button>
+        </div>
+        <div style="font-size:0.83rem; color:var(--text-secondary); margin-bottom:0.9rem; line-height:1.45;">
+          Paste historical records from Excel, CSV, or text below. You do <strong>not</strong> need LN codes — the system automatically fuzzy-matches product names against the 9,458 Godrej catalog items, sorts the ledger chronologically, and recalculates running stock!
+        </div>
+        <div class="form-group">
+          <label style="display:flex; justify-content:space-between; align-items:center;">
+            <span>Historical Data (CSV, TSV, or Tab-Separated)</span>
+            <span style="font-size:0.75rem; color:var(--text-muted);">Format: Product Name, Qty, Action (IN/OUT), Date (optional)</span>
+          </label>
+          <textarea id="historicalInputText" class="glass-input" rows="7" style="width:100%; font-family:var(--font-mono); font-size:0.8rem; resize:vertical;" placeholder="Example:
+Slimline 2 Dr Pacific blue, 1, OUT, 2026-11-10
+Zeftig 3str sofa Fab Cream, 2, IN, 2026-11-08
+Nixy Pillow 17 27, 4, IN, 2026-11-09"></textarea>
+        </div>
+        <div style="display:flex; gap:0.5rem; margin-bottom:0.9rem;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="App.previewHistoricalMapping()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <span>Preview Catalog Matches</span>
+          </button>
+        </div>
+        <div id="historicalPreviewContainer" class="hidden" style="max-height:220px; overflow-y:auto; margin-bottom:1rem; border:1px solid var(--border-color); border-radius:var(--radius-sm); padding:0.6rem; background:rgba(0,0,0,0.15);">
+          <!-- Rendered preview -->
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="App.hideImportHistoricalModal()">Cancel</button>
+          <button type="button" id="submitHistoricalImportBtn" class="btn btn-primary" onclick="App.submitHistoricalImport()">
+            <span>Import &amp; Reconcile Ledger</span>
+          </button>
+        </div>
       </div>
     </div>
 

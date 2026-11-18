@@ -90,6 +90,27 @@ class DeleteInventoryBatchRequest(BaseModel):
     username: Optional[str] = "admin"
 
 
+class HistoricalImportItem(BaseModel):
+    product_name: Optional[str] = None
+    description: Optional[str] = None
+    ln_code: Optional[str] = None
+    action: str = "IN"
+    quantity: int = 1
+    timestamp: Optional[str] = None
+    date: Optional[str] = None
+    reference: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class HistoricalImportRequest(BaseModel):
+    items: List[HistoricalImportItem]
+    username: Optional[str] = "admin"
+
+
+class MatchPreviewRequest(BaseModel):
+    names: List[str]
+
+
 # ----------------- AUTH ENDPOINTS -----------------
 @app.post("/api/login")
 def login(req: LoginRequest):
@@ -259,6 +280,59 @@ def get_logs(limit: int = 150, action: Optional[str] = None, employee: Optional[
             limit=limit, action=action, employee=employee, force_refresh=bool(refresh)
         )
     }
+
+
+@app.post("/api/admin/match-preview")
+def match_names_preview(req: MatchPreviewRequest):
+    results = []
+    for raw in req.names:
+        clean = (raw or "").strip()
+        if not clean:
+            continue
+        match = catalog.match_name(clean)
+        if match:
+            it = match["item"]
+            results.append({
+                "input_name": clean,
+                "matched": True,
+                "ln_code": it["ln_code"],
+                "description": it["description"],
+                "category": it["category"],
+                "consumer_price": it["consumer_price"],
+                "score": match["score"]
+            })
+        else:
+            results.append({
+                "input_name": clean,
+                "matched": False,
+                "ln_code": None,
+                "description": clean,
+                "category": "",
+                "consumer_price": 0.0,
+                "score": 0.0
+            })
+    return {"results": results}
+
+
+@app.post("/api/admin/reconcile-ledger")
+def reconcile_ledger(role: str = Query("admin"), username: str = Query("admin")):
+    if (role or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can reconcile ledger.")
+    ok, msg, summary = gsheets_db.reconcile_and_reorganize_ledger(employee_username=username)
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"success": True, "message": msg, "summary": summary}
+
+
+@app.post("/api/admin/import-historical")
+def import_historical(req: HistoricalImportRequest, role: str = Query("admin")):
+    if (role or "").strip().lower() != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can import historical data.")
+    items_dict = [it.dict() for it in req.items]
+    ok, msg, summary = gsheets_db.import_historical_batch(items_dict, employee_username=req.username or "admin")
+    if not ok:
+        raise HTTPException(status_code=500, detail=msg)
+    return {"success": True, "message": msg, "summary": summary}
 
 
 @app.get("/api/backups")

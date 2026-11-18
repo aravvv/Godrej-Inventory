@@ -14,7 +14,10 @@ This document is the **single source of truth** for the architecture, business l
 ### Essential Rules & Invariants:
 1. **Google Sheets is the Primary Production Database** (`gsheets_db.py`). There is NO PostgreSQL or MySQL. Do NOT introduce an external DB unless requested. Local SQLite (`inventory.db`) was only used during early prototyping and has been migrated into the Google Sheet `Users` tab.
 2. **Timezone is Indian Standard Time (IST, UTC+05:30)**: Vercel serverless containers run in UTC. Never use raw `datetime.now()` without timezone conversion. Always use `get_ist_now()` or `get_ist_now_str()` in `gsheets_db.py`.
-3. **0-Stock Preservation**: Products whose stock drops to `0` via `OUT` or `CAME_IN_AND_WENT_OUT` must **remain in the Google Sheet `Live_Inventory`** with `Current Stock = 0`. They are NEVER deleted automatically. Rows are removed ONLY when an admin explicitly executes a deletion.
+3. **0-Stock & Deficit (Negative Stock) Preservation**:
+   - Products whose stock drops to `0` or below via `OUT` must **remain in the Google Sheet `Live_Inventory`**. They are NEVER deleted automatically. Rows are removed ONLY when an admin explicitly executes a deletion.
+   - If an item was not in stock (or had stock `0`) and is OUTed, its stock decreases into deficit (`0 -> -qty`, e.g. `0 -> -1`).
+   - For Direct Transit (`CAME_IN_AND_WENT_OUT`), net stock remains unchanged (`0 -> 0`).
 4. **No Inline Delete Buttons**: Do not add individual "Delete" buttons to product cards or table rows. Deletion is done via **Hold / Long-Press (~420ms)** or **Right-Click** multi-selection with the floating Selection Action Bar and confirmation modal.
 5. **Audit Logs are Admin-Only**: The `GET /api/logs` endpoint and `#logsTab` in the frontend are **strictly restricted to admin users**. Non-admin requests receive `403 Forbidden`.
 6. **Price Visibility**: Dealer Price is visible ONLY to admins in the Admin Panel and in Excel exports requested by admins. Employees see neither Dealer Price nor Consumer Price on their default views.
