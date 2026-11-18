@@ -49,7 +49,8 @@ flowchart TD
 
 ## 3. Google Sheets Database Specification (`gsheets_db.py`)
 
-**Spreadsheet ID:** `1BF1RgdQVmffReUPSHnKoE-N_jQqmx02OOVXtNlxQ2sc`  
+**Production Spreadsheet ID:** `1BF1RgdQVmffReUPSHnKoE-N_jQqmx02OOVXtNlxQ2sc` (`Inventory_sync`)  
+**Localhost / Dev Spreadsheet ID:** `1kOSl6xQW0CV1oNgeSNAxBdnAmYke2duO30DWsU7qsZE` (`Inventory_sync_DEV` — configured via gitignored `.env` `GOOGLE_SHEET_ID` so localhost testing never touches live production data)  
 **Authentication:** Service account credentials stored in `service_account.json` (or passed as base64/JSON string via `GSHEETS_SERVICE_ACCOUNT_JSON` environment variable on Vercel).
 
 ### Worksheets & Schemas:

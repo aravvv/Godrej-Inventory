@@ -652,6 +652,36 @@ Nixy Pillow 17 27, 4, IN, 2026-11-09"></textarea>
       </div>
     </div>
 
+    <!-- Modal: LN Code Length Warning Prompt -->
+    <div id="lnValidationModal" class="modal hidden">
+      <div class="modal-card" style="max-width: 460px;">
+        <div class="modal-header">
+          <h3 style="color:#f59e0b;display:flex;align-items:center;gap:0.45rem;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+            <span>LN Code Length Warning</span>
+          </h3>
+          <button class="btn-close" onclick="App.cancelLnValidation()">&times;</button>
+        </div>
+        <div class="ln-warning-box">
+          <p id="lnValidationPromptMsg" class="ln-warning-title">
+            Please scan again, LN Code longer/shorter than accepted
+          </p>
+        </div>
+        <div id="lnValidationDetails" style="font-size:0.84rem;color:var(--text-secondary);line-height:1.45;">
+          <!-- Dynamically populated with affected LN code(s), character lengths, and catalog status -->
+        </div>
+        <div class="modal-actions" style="flex-direction:column;gap:0.6rem;margin-top:1.15rem;">
+          <button type="button" id="btnExtractAsItIs" class="btn btn-warning" style="width:100%;justify-content:center;padding:0.75rem 1rem;font-size:0.92rem;font-weight:600;" onclick="App.confirmExtractAsItIs()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            <span>Extract as it is</span>
+          </button>
+          <button type="button" class="btn btn-secondary" style="width:100%;justify-content:center;" onclick="App.cancelLnValidation()">
+            <span>Scan Again</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Notification Toast -->
     <div id="toast" class="toast hidden"></div>
   </div>

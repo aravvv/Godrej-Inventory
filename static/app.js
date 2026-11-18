@@ -377,9 +377,9 @@ const App = {
       const data = await res.json();
 
       if (data.success) {
-        this.playSuccessSound();
         const p = data.product;
-        this.addStagedItem({
+        const lnCode = (data.ln_code || "").trim();
+        const itemToStage = {
           ln_code: data.ln_code,
           description: p.description,
           sku: p.sku,
@@ -390,8 +390,27 @@ const App = {
           quantity: 1,
           thumbnail: data.thumbnail || "",
           catalog_match: data.catalog_match
-        });
-        this.showToast(`Matched: ${p.description}`, "success");
+        };
+
+        // Check if code has more or fewer characters than official 15-char standard
+        if (lnCode.length !== 15) {
+          this.promptLnValidation({
+            sourceType: "slip",
+            itemsToStage: [itemToStage],
+            flaggedItems: [{
+              code: lnCode,
+              length: lnCode.length,
+              description: p.description,
+              catalog_match: data.catalog_match
+            }]
+          });
+          return;
+        }
+
+        // Standard 15 characters: directly stage (even if unlisted on price list)
+        this.playSuccessSound();
+        this.addStagedItem(itemToStage);
+        this.showToast(data.catalog_match ? `Matched: ${p.description}` : `Extracted (Unlisted): ${p.description}`, "success");
       } else {
         this.showToast(data.error || "Could not read LN code on slip", "error");
       }
@@ -424,22 +443,48 @@ const App = {
       const data = await res.json();
 
       if (data.success && data.items && data.items.length > 0) {
-        this.playSuccessSound();
+        const itemsToStage = data.items.map(it => ({
+          ln_code: it.ln_code,
+          description: it.description,
+          sku: it.sku,
+          category: it.category,
+          sub_cat: it.sub_cat,
+          dealer_price: it.dealer_price,
+          consumer_price: it.consumer_price,
+          quantity: it.quantity,
+          thumbnail: "",
+          catalog_match: it.catalog_match,
+          invoice_no: data.invoice_no
+        }));
+
+        // Check if any items have non-15-character codes
+        const flaggedItems = [];
         data.items.forEach(it => {
-          this.addStagedItem({
-            ln_code: it.ln_code,
-            description: it.description,
-            sku: it.sku,
-            category: it.category,
-            sub_cat: it.sub_cat,
-            dealer_price: it.dealer_price,
-            consumer_price: it.consumer_price,
-            quantity: it.quantity,
-            thumbnail: "",
-            catalog_match: it.catalog_match,
-            invoice_no: data.invoice_no
-          });
+          const code = (it.ln_code || "").trim();
+          if (code.length !== 15) {
+            flaggedItems.push({
+              code: code,
+              length: code.length,
+              description: it.description,
+              catalog_match: it.catalog_match
+            });
+          }
         });
+
+        if (flaggedItems.length > 0) {
+          this.promptLnValidation({
+            sourceType: "bill",
+            invoice_no: data.invoice_no,
+            total_units: data.total_units,
+            itemsToStage: itemsToStage,
+            flaggedItems: flaggedItems
+          });
+          return;
+        }
+
+        // All items have standard 15-character codes: directly stage
+        this.playSuccessSound();
+        itemsToStage.forEach(it => this.addStagedItem(it));
         this.showToast(`Extracted ${data.total_units} units from Invoice #${data.invoice_no}`, "success");
       } else {
         this.showToast(data.error || "No items detected on invoice image", "error");
@@ -461,36 +506,54 @@ const App = {
     try {
       const res = await fetch(`/api/lookup/${encodeURIComponent(code)}`);
       const data = await res.json();
+
+      const itemToStage = data.found ? {
+        ln_code: data.item.ln_code,
+        description: data.item.description,
+        sku: data.item.sku,
+        category: data.item.category,
+        sub_cat: data.item.sub_cat,
+        dealer_price: data.item.dealer_price,
+        consumer_price: data.item.consumer_price,
+        quantity: 1,
+        thumbnail: "",
+        catalog_match: true
+      } : {
+        ln_code: code,
+        description: "Unlisted Item",
+        sku: "MANUAL",
+        category: "General",
+        sub_cat: "",
+        dealer_price: 0,
+        consumer_price: 0,
+        quantity: 1,
+        thumbnail: "",
+        catalog_match: false
+      };
+
+      // Check if manually entered code has non-15 characters
+      if (code.length !== 15) {
+        input.value = "";
+        this.promptLnValidation({
+          sourceType: "manual",
+          itemsToStage: [itemToStage],
+          flaggedItems: [{
+            code: code,
+            length: code.length,
+            description: itemToStage.description,
+            catalog_match: data.found
+          }]
+        });
+        return;
+      }
+
       if (data.found) {
         this.playSuccessSound();
-        const it = data.item;
-        this.addStagedItem({
-          ln_code: it.ln_code,
-          description: it.description,
-          sku: it.sku,
-          category: it.category,
-          sub_cat: it.sub_cat,
-          dealer_price: it.dealer_price,
-          consumer_price: it.consumer_price,
-          quantity: 1,
-          thumbnail: "",
-          catalog_match: true
-        });
+        this.addStagedItem(itemToStage);
         input.value = "";
-        this.showToast(`Added: ${it.description}`, "success");
+        this.showToast(`Added: ${data.item.description}`, "success");
       } else {
-        this.addStagedItem({
-          ln_code: code,
-          description: "Unlisted Item",
-          sku: "MANUAL",
-          category: "General",
-          sub_cat: "",
-          dealer_price: 0,
-          consumer_price: 0,
-          quantity: 1,
-          thumbnail: "",
-          catalog_match: false
-        });
+        this.addStagedItem(itemToStage);
         input.value = "";
         this.showToast(`Unlisted code ${code} staged`, "info");
       }
@@ -1336,6 +1399,72 @@ const App = {
 
   hideImportHistoricalModal() {
     document.getElementById("importHistoricalModal").classList.add("hidden");
+  },
+
+  promptLnValidation(payload) {
+    this._pendingScanData = payload;
+    const modal = document.getElementById("lnValidationModal");
+    const details = document.getElementById("lnValidationDetails");
+    if (!modal || !details) return;
+
+    let html = `<div style="margin-bottom:0.75rem;font-size:0.84rem;color:var(--text-secondary);line-height:1.45;">`;
+    html += `Official Godrej LN Codes are strictly <strong>15 characters</strong> (8 digits + 2 letters + 5 digits). `;
+    html += `The following scanned code${payload.flaggedItems.length > 1 ? 's do' : ' does'} not have 15 characters:`;
+    html += `</div>`;
+
+    html += `<div class="ln-flagged-list">`;
+    payload.flaggedItems.forEach(fi => {
+      const diff = fi.length < 15
+        ? `${15 - fi.length} char${15 - fi.length > 1 ? 's' : ''} shorter`
+        : `${fi.length - 15} char${fi.length - 15 > 1 ? 's' : ''} longer`;
+
+      html += `
+        <div class="ln-flagged-card">
+          <div class="ln-flagged-code-row">
+            <span class="ln-flagged-code">${this.escapeHtml(fi.code || 'UNKNOWN')}</span>
+            <span class="ln-flagged-badge">${fi.length} chars (${diff})</span>
+          </div>
+          <div class="ln-flagged-desc">${this.escapeHtml(fi.description || 'Godrej Item')}</div>
+          <div class="ln-flagged-meta">
+            <span class="ln-status-tag">${fi.catalog_match ? 'Listed in price list' : 'Unlisted on price list'}</span>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+
+    if (payload.sourceType === "bill" && payload.itemsToStage.length > payload.flaggedItems.length) {
+      const validCount = payload.itemsToStage.length - payload.flaggedItems.length;
+      html += `<div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:0.75rem;">(${validCount} other line item${validCount > 1 ? 's' : ''} on this invoice had accepted 15-character codes).</div>`;
+    }
+
+    details.innerHTML = html;
+    modal.classList.remove("hidden");
+  },
+
+  confirmExtractAsItIs() {
+    if (!this._pendingScanData) return;
+    const { itemsToStage, sourceType, invoice_no, total_units } = this._pendingScanData;
+    this.playSuccessSound();
+    itemsToStage.forEach(it => this.addStagedItem(it));
+
+    if (sourceType === "slip") {
+      const it = itemsToStage[0];
+      this.showToast(`Extracted as it is: ${it.description} (${it.ln_code})`, "warning");
+    } else {
+      this.showToast(`Extracted ${total_units || itemsToStage.length} units from Invoice #${invoice_no || ''} as it is`, "warning");
+    }
+
+    this.cancelLnValidation(false);
+  },
+
+  cancelLnValidation(showToast = true) {
+    this._pendingScanData = null;
+    const modal = document.getElementById("lnValidationModal");
+    if (modal) modal.classList.add("hidden");
+    if (showToast) {
+      this.showToast("Scan discarded. Please re-align and scan again.", "info");
+    }
   },
 
   parseHistoricalLines() {
